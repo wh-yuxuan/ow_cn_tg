@@ -48,7 +48,7 @@ interface DashenResponse<T = any> {
 }
 
 // ============================================================================
-// 2. 网易大神 HTTP 客户端（严格对齐 apiclient.py）
+// 2. 网易大神 HTTP 客户端
 // ============================================================================
 
 class DashenError extends Error {
@@ -223,7 +223,7 @@ async function queryMatchInfo(
 }
 
 // ============================================================================
-// 3. 数据提取与格式化工具（高容错解析网易大神动态字段）
+// 3. 数据提取与格式化工具
 // ============================================================================
 
 function escapeHtml(text: string): string {
@@ -244,6 +244,31 @@ function pickField(obj: any, keys: string[]): any {
   for (const key of keys) {
     if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
       return obj[key];
+    }
+  }
+  return undefined;
+}
+
+/** 从对象及常见嵌套子对象（mapInfo / gameInfo / battleInfo 等）中提取字段 */
+function pickDeepField(obj: any, keys: string[]): any {
+  const direct = pickField(obj, keys);
+  if (direct !== undefined) return direct;
+  if (!obj || typeof obj !== "object") return undefined;
+
+  const nestedContainers = [
+    obj.mapInfo,
+    obj.map,
+    obj.battleInfo,
+    obj.gameInfo,
+    obj.matchInfo,
+    obj.stat,
+    obj.stats,
+    obj.data,
+  ];
+  for (const sub of nestedContainers) {
+    if (sub && typeof sub === "object" && !Array.isArray(sub)) {
+      const found = pickField(sub, keys);
+      if (found !== undefined) return found;
     }
   }
   return undefined;
@@ -368,7 +393,98 @@ function formatTimestamp(ts: any): string {
   return `${mm}-${dd} ${hh}:${mi}`;
 }
 
-/** 轻量内存缓存：为单场对局详情按钮分配短 Key（规避 Telegram 64 字节限制） */
+/** 解析单条对局的胜负状态 */
+function parseMatchResultBadge(m: any): string {
+  const rawResult = pickDeepField(m, [
+    "result",
+    "win",
+    "isWin",
+    "is_win",
+    "winFlag",
+    "win_flag",
+    "matchResult",
+    "match_result",
+    "battleResult",
+    "battle_result",
+    "gameResult",
+    "outcome",
+    "status",
+  ]);
+
+  if (rawResult === undefined || rawResult === null || rawResult === "") {
+    return "⚪平";
+  }
+
+  if (typeof rawResult === "boolean") {
+    return rawResult ? "🟢胜" : "🔴负";
+  }
+
+  if (typeof rawResult === "number") {
+    if (rawResult === 1) return "🟢胜";
+    if (rawResult === 2 || rawResult === -1) return "🔴负";
+    if (rawResult === 0) return "⚪平";
+  }
+
+  const s = String(rawResult).trim().toLowerCase();
+  if (["1", "true", "win", "won", "victory", "胜", "胜利"].includes(s)) {
+    return "🟢胜";
+  }
+  if (
+    ["2", "-1", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(
+      s
+    )
+  ) {
+    return "🔴负";
+  }
+  if (["0", "draw", "tie", "平", "平局"].includes(s)) {
+    return "⚪平";
+  }
+
+  return "⚪平";
+}
+
+/** 解析单条对局的地图名称（若缺失则返回明确提示而不是笼统的未知地图） */
+function parseMatchMapName(m: any): string {
+  const mapVal = pickDeepField(m, [
+    "mapName",
+    "map_name",
+    "mapCnName",
+    "map_cn_name",
+    "battleMapName",
+    "sceneName",
+    "scene_name",
+    "stageName",
+    "mapTitle",
+    "map",
+  ]);
+
+  if (typeof mapVal === "string" && mapVal.trim()) {
+    return mapVal.trim();
+  }
+  if (mapVal && typeof mapVal === "object") {
+    const nestedName = pickField(mapVal, [
+      "name",
+      "mapName",
+      "cnName",
+      "title",
+    ]);
+    if (nestedName) return String(nestedName);
+  }
+
+  const modeVal = pickDeepField(m, [
+    "gameModeName",
+    "modeName",
+    "subModeName",
+    "gameMode",
+  ]);
+  if (typeof modeVal === "string" && modeVal.trim()) {
+    return `${modeVal.trim()}对局`;
+  }
+
+  return "未标注地图";
+}
+
+/** 轻量内存缓存：为单场对局详情按钮分配短 Key */
 const matchCache = new Map<
   string,
   {
@@ -446,7 +562,9 @@ async function buildCnOverviewView(
   ]);
 
   const metaParts: string[] = [`模式：${modeLabel}`];
-  if (levelVal !== undefined) metaParts.push(`赞赏 Lv.${escapeHtml(String(levelVal))}`);
+  if (levelVal !== undefined) {
+    metaParts.push(`赞赏 Lv.${escapeHtml(String(levelVal))}`);
+  }
   if (gameTimeVal !== undefined) {
     const gtStr =
       typeof gameTimeVal === "number"
@@ -459,12 +577,12 @@ async function buildCnOverviewView(
   }
 
   const lines: string[] = [
-    `🇨🇳 <b>${displayName}</b>（国服）`,
+    `🇨🇳 <b>${displayName}</b>（国服总览）`,
     metaParts.join("  |  "),
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
-  // 1. 提取段位信息（兼容对象与数组两种常见结构）
+  // 1. 提取段位信息
   const rankLines: string[] = [];
   if (cardData && typeof cardData === "object") {
     const rankList =
@@ -589,7 +707,6 @@ async function buildCnOverviewView(
       );
     }
 
-    // 常用英雄列表
     const heroList =
       countData?.heroList ||
       countData?.heroes ||
@@ -683,44 +800,35 @@ async function buildCnMatchListView(
     for (let i = 0; i < Math.min(matches.length, 8); i++) {
       const m = matches[i];
       const matchId = String(
-        pickField(m, ["matchId", "match_id", "id", "battleId"]) || ""
+        pickDeepField(m, ["matchId", "match_id", "id", "battleId"]) || ""
       );
-      const mapName = String(
-        pickField(m, ["mapName", "map", "mapCnName"]) || "未知地图"
-      );
+      const mapName = parseMatchMapName(m);
       const heroName = String(
-        pickField(m, ["heroName", "hero", "mostHeroName", "mainHeroName"]) || ""
+        pickDeepField(m, [
+          "heroName",
+          "hero_name",
+          "hero",
+          "mostHeroName",
+          "mainHeroName",
+        ]) || ""
       );
-      const rawResult = pickField(m, [
-        "result",
-        "win",
-        "isWin",
-        "matchResult",
-        "battleResult",
-      ]);
-      const resultBadge =
-        rawResult === 1 ||
-        rawResult === true ||
-        rawResult === "win" ||
-        rawResult === "胜利"
-          ? "🟢胜"
-          : rawResult === 2 ||
-              rawResult === 0 ||
-              rawResult === false ||
-              rawResult === "lose" ||
-              rawResult === "失败"
-            ? "🔴负"
-            : "⚪平";
+      const resultBadge = parseMatchResultBadge(m);
 
-      const kills = pickField(m, ["eliminations", "kills", "kill", "elim"]);
-      const deaths = pickField(m, ["deaths", "death"]);
-      const assists = pickField(m, ["assists", "assist"]);
+      const kills = pickDeepField(m, [
+        "eliminations",
+        "kills",
+        "kill",
+        "elim",
+        "elimNum",
+      ]);
+      const deaths = pickDeepField(m, ["deaths", "death", "deathNum"]);
+      const assists = pickDeepField(m, ["assists", "assist", "assistNum"]);
       const kdaStr =
         kills !== undefined || deaths !== undefined
           ? ` ${formatNum(kills)}/${formatNum(deaths)}${assists !== undefined ? `/${formatNum(assists)}` : ""}`
           : "";
       const timeStr = formatTimestamp(
-        pickField(m, [
+        pickDeepField(m, [
           "endTime",
           "createTime",
           "matchTime",
@@ -789,13 +897,15 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   const res = await queryMatchInfo(entry.customerToken, entry.matchId);
   const detail = unwrapData(res);
 
-  const mapName = String(
-    pickField(detail, ["mapName", "map", "mapCnName"]) || "单场对局详情"
-  );
+  const mapName = parseMatchMapName(detail);
   const modeName = String(
-    pickField(detail, ["gameModeName", "modeName", "gameMode"]) || ""
+    pickDeepField(detail, ["gameModeName", "modeName", "gameMode"]) || ""
   );
-  const duration = pickField(detail, ["duration", "gameTime", "matchDuration"]);
+  const duration = pickDeepField(detail, [
+    "duration",
+    "gameTime",
+    "matchDuration",
+  ]);
 
   const lines: string[] = [
     `🔍 <b>${escapeHtml(mapName)}</b>${modeName ? ` (${escapeHtml(modeName)})` : ""}`,
@@ -823,11 +933,13 @@ async function buildCnMatchDetailView(refId: string): Promise<{
         ]) || "玩家"
       );
       const pHero = String(
-        pickField(p, ["heroName", "hero", "mainHeroName"]) || ""
+        pickField(p, ["heroName", "hero_name", "hero", "mainHeroName"]) || ""
       );
-      const e = formatNum(pickField(p, ["eliminations", "kills", "kill"]));
-      const a = formatNum(pickField(p, ["assists", "assist"]));
-      const d = formatNum(pickField(p, ["deaths", "death"]));
+      const e = formatNum(
+        pickField(p, ["eliminations", "kills", "kill", "elimNum"])
+      );
+      const a = formatNum(pickField(p, ["assists", "assist", "assistNum"]));
+      const d = formatNum(pickField(p, ["deaths", "death", "deathNum"]));
       const dmg = formatNum(
         pickField(p, ["heroDamage", "damage", "damageDone"])
       );
@@ -839,14 +951,18 @@ async function buildCnMatchDetailView(refId: string): Promise<{
       );
     }
   } else {
-    const e = formatNum(pickField(detail, ["eliminations", "kills", "kill"]));
-    const a = formatNum(pickField(detail, ["assists", "assist"]));
-    const d = formatNum(pickField(detail, ["deaths", "death"]));
+    const e = formatNum(
+      pickDeepField(detail, ["eliminations", "kills", "kill", "elimNum"])
+    );
+    const a = formatNum(
+      pickDeepField(detail, ["assists", "assist", "assistNum"])
+    );
+    const d = formatNum(pickDeepField(detail, ["deaths", "death", "deathNum"]));
     const dmg = formatNum(
-      pickField(detail, ["heroDamage", "damage", "damageDone"])
+      pickDeepField(detail, ["heroDamage", "damage", "damageDone"])
     );
     const heal = formatNum(
-      pickField(detail, ["healing", "heal", "healingDone"])
+      pickDeepField(detail, ["healing", "heal", "healingDone"])
     );
     lines.push(
       `• 消灭/助攻/阵亡：<b>${e} / ${a} / ${d}</b>`,
