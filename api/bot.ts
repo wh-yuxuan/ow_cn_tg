@@ -32,6 +32,211 @@ const SEARCH_BNET_ACCOUNT_URL = `${DASHEN_API_ROOT}/searchBnetAccount`;
 
 const API_TIMEOUT_MS = 12_000;
 
+/** 对齐 Overstats src/constants/chara.py 的英雄标准名与外号别名映射 */
+const DASHEN_HERO_ALIASES: Record<string, string[]> = {
+  安娜: ["ana", "安娜", "鸡妈", "恐怖老太太", "娜娜", "激素老太", "禁疗摩西"],
+  艾什: ["ashe", "ash", "艾什", "艾许", "王母娘娘", "老八"],
+  巴蒂斯特: ["baptiste", "巴蒂斯特", "巴蒂", "8d", "八弟", "大76"],
+  堡垒: ["bastion", "堡垒"],
+  布丽吉塔: [
+    "brigitte",
+    "brig",
+    "布丽吉塔",
+    "锤妹",
+    "那个女人",
+    "小锤",
+    "锤女",
+    "tiger",
+    "布里",
+    "nt",
+    "脑瘫",
+  ],
+  卡西迪: [
+    "cassidy",
+    "卡西迪",
+    "麦克雷",
+    "天王老子",
+    "幽默左轮人",
+    "麦卡利",
+    "麦爹",
+    "午时已到",
+  ],
+  末日铁拳: [
+    "doomfist",
+    "末日铁拳",
+    "铁拳",
+    "那个男人",
+    "牢肘",
+    "牢大",
+    "毁天灭地",
+    "肘击王",
+    "卤蛋",
+    "屁王",
+    "pva",
+    "上勾拳",
+  ],
+  "D.Va": ["d.va", "dva", "宋哈娜", "机甲摩西", "宋荷娜", "网瘾少女"],
+  回声: ["echo", "回声"],
+  源氏: [
+    "genji",
+    "源氏",
+    "忍者",
+    "根基",
+    "飞镖人",
+    "源",
+    "原",
+    "源劈",
+    "原始",
+    "原氏",
+    "有基佬开我裤链",
+    "源批",
+  ],
+  半藏: ["hanzo", "半藏"],
+  骇灾: ["hazard", "骇灾", "三体人", "唐人", "哈扎德", "嗨仔"],
+  伊拉锐: ["illari", "伊拉锐", "太阳摩西", "光塔摩西", "依拉瑞", "日女"],
+  渣客女王: ["junkerqueen", "junker-queen", "渣客女王", "女王", "渣女", "扎克"],
+  狂鼠: ["junkrat", "狂鼠", "老鼠", "炸弹人"],
+  朱诺: ["juno", "朱诺", "火星摩西", "轨投", "火星雨姐"],
+  雾子: ["kiriko", "雾子", "物资", "污渍", "乌兹"],
+  生命之梭: ["lifeweaver", "生命之梭", "花男", "男摩西", "大树摩西"],
+  卢西奥: ["lucio", "dj", "卢西奥", "音乐摩西", "打碟摩西"],
+  毛加: ["mauga", "ssvgg", "毛加", "体育生"],
+  美: ["mei", "美", "小美", "美妈", "周美玲", "麦克美", "贾玲", "周美灵"],
+  天使: [
+    "mercy",
+    "天使",
+    "摩西",
+    "摩西本西",
+    "摩西女",
+    "神秘摩西女",
+    "安吉拉",
+    "angel",
+    "怜悯",
+  ],
+  莫伊拉: ["moira", "莫伊拉", "莫伊", "莫姨"],
+  奥丽莎: [
+    "orisa",
+    "奥丽莎",
+    "羊驼",
+    "佐巴杨",
+    "羊",
+    "美羊羊",
+    "左巴杨",
+    "传奇机长",
+    "传奇机长左巴杨",
+    "佐巴扬",
+    "肘巴羊",
+    "金色答辩",
+  ],
+  法老之鹰: ["pharah", "法老之鹰", "法鸡", "法拉", "鸡", "瓦鸡", "挖机"],
+  拉玛刹: [
+    "ramattra",
+    "拉玛刹",
+    "拉玛",
+    "牢玛",
+    "拉答辩",
+    "鲑鱼",
+    "鲑鱼大帝",
+    "老马",
+    "鳜鱼",
+    "紫色答辩",
+  ],
+  死神: ["reaper", "死神", "活神", "谐星"],
+  莱因哈特: ["reinhardt", "莱因哈特", "莱因", "大锤", "大锤哥", "锤哥"],
+  路霸: ["roadhog", "路霸", "猪猪", "猪", "🐖", "🐷"],
+  西格玛: ["sigma", "西格玛", "老大爷", "大爷"],
+  索杰恩: ["sojourn", "索杰恩", "索杰", "索姐", "索", "超人强"],
+  "士兵：76": [
+    "soldier76",
+    "soldier-76",
+    "士兵76",
+    "士兵：76",
+    "76",
+    "士兵",
+    "逃兵",
+    "逃兵76",
+    "跑男",
+    "小巴蒂",
+    "小8d",
+    "幽默跑步男",
+  ],
+  黑影: ["sombra", "黑影", "邓紫琪", "邓紫棋"],
+  秩序之光: ["symmetra", "秩序之光", "光子", "光子妹", "光妹", "三妹", "阿三", "辛梅塔"],
+  托比昂: ["torbjorn", "托比昂", "托比", "托比昂哥", "托比哥", "中锤", "矮子", "炮台", "矮人"],
+  猎空: ["tracer", "猎空", "闪光", "裂空"],
+  探奇: [
+    "venture",
+    "探奇",
+    "地鼠",
+    "钻机",
+    "轰轰钻机",
+    "丁真",
+    "顶针",
+    "顶真",
+    "末日铁钻",
+    "土行孙",
+    "钻地狗",
+    "钻地婆",
+    "钻头小子",
+  ],
+  黑百合: ["widowmaker", "黑百合", "百合", "黑寡妇", "狙", "大狙", "紫薯", "紫薯小人"],
+  温斯顿: ["winston", "温斯顿", "猩猩", "星星", "老詹", "牢詹", "猴子", "詹姆斯"],
+  破坏球: ["wreckingball", "wrecking-ball", "破坏球", "球球", "球", "仓鼠"],
+  查莉娅: ["zarya", "查莉娅", "毛妹", "俄罗斯雨姐", "雨姐", "东北雨姐", "国潮", "国潮来袭"],
+  禅雅塔: ["zenyatta", "禅雅塔", "和尚", "光头摩西", "悬浮摩西"],
+  弗蕾娅: ["freja", "弗蕾娅", "弗蕾娅大人", "芙蕾雅", "芙蕾雅大人"],
+  无漾: ["wuyang", "无漾", "玩水摩西", "水男", "无恙", "水摩西", "五羊"],
+  斩仇: ["vendetta", "lupa", "斩仇", "狼女", "大剑"],
+  安燃: ["anran", "安燃", "姐姐", "火女", "凤凰女", "不知火舞", "凤凰", "朱雀", "不知火", "火舞", "扇子摩西"],
+  金驭: ["domina", "金驭", "金玉", "禁欲", "金御", "妈妈", "妈", "总裁", "金羽"],
+  埃姆雷: ["emre", "埃姆雷", "m雷", "猫雷", "艾姆雷"],
+  飞天猫: ["jetpackcat", "jetpack-cat", "飞天猫", "耄耋", "哈基米", "猫", "猫猫", "豪猫", "键帽"],
+  瑞稀: ["mizuki", "瑞稀", "瑞希", "斗笠男", "绿帽", "乌龟", "锁链男", "斗笠摩西", "河童", "镰刀男"],
+  西拉: ["sierra", "西拉", "鸟人", "拉稀", "埃科", "希拉", "茜拉", "拉西"],
+  死怨: ["shion", "死怨"],
+  "D.Mon": ["d.mon"],
+  血律: ["doctrine", "血律", "吸血鬼"],
+};
+
+const HERO_ALIAS_TO_CN: Record<string, string> = (() => {
+  const map: Record<string, string> = {};
+  for (const [canonicalName, aliases] of Object.entries(DASHEN_HERO_ALIASES)) {
+    map[canonicalName.toLowerCase()] = canonicalName;
+    for (const alias of aliases) {
+      map[String(alias).trim().toLowerCase()] = canonicalName;
+    }
+  }
+  return map;
+})();
+
+function resolveDashenHeroName(raw: any): string {
+  if (raw === undefined || raw === null) return "";
+  const str = String(raw).trim();
+  if (!str) return "";
+  const lower = str.toLowerCase();
+  if (HERO_ALIAS_TO_CN[lower]) {
+    return HERO_ALIAS_TO_CN[lower];
+  }
+  if (/^\d{10,}$/.test(str)) {
+    return `英雄#${str.slice(-5)}`;
+  }
+  return str;
+}
+
+function translateModeCode(modeVal: any): string {
+  if (!modeVal) return "";
+  const s = String(modeVal).trim();
+  const map: Record<string, string> = {
+    sportpreset: "竞技预设",
+    sport: "竞技预设",
+    leisurepreset: "快速预设",
+    leisure: "快速预设",
+    sportopen: "竞技自由",
+    leisureopen: "快速自由",
+  };
+  return map[s.toLowerCase()] || s;
+}
+
 if (!BOT_TOKEN) {
   throw new Error("缺少环境变量 BOT_TOKEN，请在 Vercel 项目设置中配置。");
 }
@@ -383,35 +588,18 @@ function formatTimestamp(ts: any): string {
   if (!ts) return "";
   if (typeof ts === "string" && /[-/:]/.test(ts)) return ts;
   const n = Number(ts);
-  if (Number.isNaN(n) || n <= 0) return "";
+  if (!Number.isFinite(n) || n <= 0) return "";
   const ms = n < 1e12 ? n * 1000 : n;
-  const d = new Date(ms + 8 * 3600 * 1000);
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mi = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${mm}-${dd} ${hh}:${mi}`;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (x: number) => String(x).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 翻译常见模式代号，避免直接暴露内部英文枚举 */
-function translateModeCode(rawMode: any): string {
-  if (!rawMode) return "";
-  const s = String(rawMode).trim();
-  const map: Record<string, string> = {
-    LeisurePreset: "快速预设",
-    LeisureOpen: "快速自由",
-    SportPreset: "竞技预设",
-    SportOpen: "竞技自由",
-    SportFight: "竞技交锋",
-    leisure: "快速比赛",
-    sport: "竞技比赛",
-  };
-  return map[s] || s;
-}
-
-/** 解析单条对局的胜负状态 */
+/** 解析单条对局的胜负状态（对齐 queryMatchList.md 的 matchRet 字段） */
 function parseMatchResultBadge(m: any): string {
   const rawResult = pickDeepField(m, [
+    "matchRet",
     "result",
     "win",
     "isWin",
@@ -437,8 +625,8 @@ function parseMatchResultBadge(m: any): string {
 
   if (typeof rawResult === "number") {
     if (rawResult === 1) return "🟢胜";
-    if (rawResult === 2 || rawResult === -1) return "🔴负";
-    if (rawResult === 0) return "⚪平";
+    if (rawResult === -1 || rawResult === 2 || rawResult === 0) return "🔴负";
+    if (rawResult === 3) return "⚪平";
   }
 
   const s = String(rawResult).trim().toLowerCase();
@@ -446,20 +634,20 @@ function parseMatchResultBadge(m: any): string {
     return "🟢胜";
   }
   if (
-    ["2", "-1", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(
+    ["-1", "2", "0", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(
       s
     )
   ) {
     return "🔴负";
   }
-  if (["0", "draw", "tie", "平", "平局"].includes(s)) {
+  if (["3", "draw", "tie", "平", "平局"].includes(s)) {
     return "⚪平";
   }
 
   return "⚪平";
 }
 
-/** 解析单条对局的地图名称 */
+/** 解析单条对局的地图名称（兼容文字地图名与 mapGuid 编号） */
 function parseMatchMapName(m: any): string {
   const mapVal = pickDeepField(m, [
     "mapName",
@@ -471,7 +659,6 @@ function parseMatchMapName(m: any): string {
     "scene_name",
     "stageName",
     "mapTitle",
-    "map",
   ]);
 
   if (typeof mapVal === "string" && mapVal.trim()) {
@@ -487,6 +674,11 @@ function parseMatchMapName(m: any): string {
     if (nestedName) return String(nestedName);
   }
 
+  const mapGuid = pickDeepField(m, ["mapGuid", "map_guid", "mapId"]);
+  if (mapGuid !== undefined) {
+    return `地图#${String(mapGuid).slice(-6)}`;
+  }
+
   const modeVal = pickDeepField(m, [
     "gameModeName",
     "modeName",
@@ -498,6 +690,27 @@ function parseMatchMapName(m: any): string {
   }
 
   return "未标注地图";
+}
+
+/** 解析单条对局的英雄名称或英雄编号提示 */
+function parseMatchHeroLabel(m: any): string {
+  const heroVal = pickDeepField(m, [
+    "heroName",
+    "hero_name",
+    "hero",
+    "mostHeroName",
+    "mainHeroName",
+  ]);
+  if (typeof heroVal === "string" && heroVal.trim()) {
+    return resolveDashenHeroName(heroVal);
+  }
+
+  const heroGuid = pickDeepField(m, ["heroGuid", "hero_guid", "heroId"]);
+  if (heroGuid !== undefined) {
+    return resolveDashenHeroName(heroGuid);
+  }
+
+  return "";
 }
 
 /** 轻量内存缓存：为单场对局详情按钮分配短 Key */
@@ -598,9 +811,19 @@ async function buildCnOverviewView(
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
+  const roleMapCn: Record<string, string> = {
+    tank: "🛡 坦克",
+    dps: "⚔️ 输出",
+    damage: "⚔️ 输出",
+    healer: "💉 支援",
+    support: "💉 支援",
+  };
+
   const rankLines: string[] = [];
   if (cardData && typeof cardData === "object") {
     const rankList =
+      countData?.guideCountData ||
+      cardData.guideCountData ||
       cardData.rankList ||
       cardData.ranks ||
       cardData.roleRankList ||
@@ -609,19 +832,37 @@ async function buildCnOverviewView(
 
     if (Array.isArray(rankList) && rankList.length > 0) {
       for (const r of rankList) {
-        const roleName =
-          pickField(r, ["roleName", "roleType", "role", "name", "typeName"]) ||
-          "职责";
-        const tierName =
-          pickField(r, [
-            "rankName",
-            "tierName",
-            "divisionName",
-            "rank",
-            "levelName",
-          ]) || "未定级";
+        const rawRole = String(
+          pickField(r, ["roleType", "roleName", "role", "name", "typeName"]) ||
+            "职责"
+        ).toLowerCase();
+        const roleLabel = roleMapCn[rawRole] || rawRole;
+        const lastRank = r?.lastRankInfo || r?.rankInfo || r;
+        const rName = pickField(lastRank, [
+          "rankName",
+          "rank_name",
+          "tierName",
+          "divisionName",
+          "rank",
+        ]);
+        const rSub = pickField(lastRank, ["rankSubTier", "rank_sub_tier"]);
+        const rScore = pickField(lastRank, ["rankScore", "rank_score"]);
+        const tierText = rName
+          ? `${rName}${rSub !== undefined && rSub !== null ? ` ${rSub}` : ""}${rScore !== undefined && rScore !== null ? ` (${rScore}分)` : ""}`
+          : "未定级";
+        const rMatches = pickField(r, ["matchSum", "matches"]);
+        const rWin = pickField(r, ["winRate", "win_rate"]);
+        const rKda = pickField(r, ["kda"]);
+        const extra = [
+          rMatches !== undefined ? `${formatNum(rMatches)}场` : "",
+          rWin !== undefined ? `胜率${formatRate(rWin)}` : "",
+          rKda !== undefined ? `KDA ${formatNum(rKda, 2)}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
         rankLines.push(
-          `• ${escapeHtml(String(roleName))}：<b>${escapeHtml(String(tierName))}</b>`
+          `• ${escapeHtml(roleLabel)}：<b>${escapeHtml(tierText)}</b>${extra ? `（${escapeHtml(extra)}）` : ""}`
         );
       }
     } else {
@@ -653,11 +894,16 @@ async function buildCnOverviewView(
 
   const statsObj =
     (countData &&
-      (countData.total || countData.summary || countData.overview || countData)) ||
+      (countData.presetsSummaryData ||
+        countData.total ||
+        countData.summary ||
+        countData.overview ||
+        countData)) ||
     null;
 
   if (statsObj && typeof statsObj === "object") {
     const totalGames = pickField(statsObj, [
+      "matchSum",
       "totalCount",
       "matchCount",
       "gamesPlayed",
@@ -665,7 +911,18 @@ async function buildCnOverviewView(
       "gameCount",
       "totalMatchNum",
     ]);
-    const winGames = pickField(statsObj, ["winCount", "gamesWon", "wins"]);
+    const winGames = pickField(statsObj, [
+      "matchWinSum",
+      "winCount",
+      "gamesWon",
+      "wins",
+    ]);
+    const lossGames = pickField(statsObj, [
+      "matchLossSum",
+      "lossCount",
+      "gamesLost",
+      "losses",
+    ]);
     const winRate = pickField(statsObj, [
       "winRate",
       "winRatio",
@@ -674,43 +931,73 @@ async function buildCnOverviewView(
     ]);
     const kda = pickField(statsObj, ["kda", "avgKda", "kd"]);
     const avgElim = pickField(statsObj, [
+      "aveKill",
       "avgEliminations",
       "avgKill",
       "elimAvg",
       "avgKills",
     ]);
+    const avgAssist = pickField(statsObj, ["aveAssist", "avgAssists"]);
     const avgDeath = pickField(statsObj, [
+      "aveDeath",
       "avgDeaths",
       "avgDeath",
       "deathAvg",
     ]);
     const avgDmg = pickField(statsObj, [
+      "aveHeroDamage",
       "avgDamage",
       "avgHeroDamage",
       "damageAvg",
     ]);
-    const avgHeal = pickField(statsObj, ["avgHeal", "avgHealing", "healAvg"]);
+    const avgHeal = pickField(statsObj, [
+      "aveCure",
+      "avgHeal",
+      "avgHealing",
+      "healAvg",
+    ]);
+    const avgResist = pickField(statsObj, [
+      "aveResistDamage",
+      "avgResistDamage",
+    ]);
 
     const statParts: string[] = [];
     if (totalGames !== undefined) {
-      statParts.push(
-        `🎮 场次：<b>${formatNum(totalGames)}</b>${winGames !== undefined ? ` (${formatNum(winGames)}胜)` : ""}`
-      );
+      const wlStr =
+        winGames !== undefined || lossGames !== undefined
+          ? ` (${winGames !== undefined ? `${formatNum(winGames)}胜` : ""}${lossGames !== undefined ? ` ${formatNum(lossGames)}负` : ""})`
+          : "";
+      statParts.push(`🎮 场次：<b>${formatNum(totalGames)}</b>${wlStr}`);
     }
     if (winRate !== undefined || kda !== undefined) {
       statParts.push(
-        `📈 胜率：<b>${formatRate(winRate)}</b>  |  KDA：<b>${formatNum(kda, 2)}</b>`
+        `📈 胜率：<b>${formatRate(winRate)}</b>${kda !== undefined ? `  |  KDA：<b>${formatNum(kda, 2)}</b>` : ""}`
       );
     }
     if (
       avgElim !== undefined ||
+      avgAssist !== undefined ||
       avgDeath !== undefined ||
       avgDmg !== undefined ||
-      avgHeal !== undefined
+      avgHeal !== undefined ||
+      avgResist !== undefined
     ) {
-      statParts.push(
-        `⚡ 场均：消灭 <b>${formatNum(avgElim, 1)}</b> · 阵亡 <b>${formatNum(avgDeath, 1)}</b> · 伤害 <b>${formatNum(avgDmg)}</b> · 治疗 <b>${formatNum(avgHeal)}</b>`
-      );
+      const kdaItems = [
+        avgElim !== undefined ? `消灭 <b>${formatNum(avgElim, 1)}</b>` : "",
+        avgAssist !== undefined ? `助攻 <b>${formatNum(avgAssist, 1)}</b>` : "",
+        avgDeath !== undefined ? `阵亡 <b>${formatNum(avgDeath, 1)}</b>` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const valItems = [
+        avgDmg !== undefined ? `伤害 <b>${formatNum(avgDmg)}</b>` : "",
+        avgHeal !== undefined ? `治疗 <b>${formatNum(avgHeal)}</b>` : "",
+        avgResist !== undefined ? `抵伤 <b>${formatNum(avgResist)}</b>` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      if (kdaItems) statParts.push(`⚔️ 场均：${kdaItems}`);
+      if (valItems) statParts.push(`📊 场均数值：${valItems}`);
     }
 
     if (statParts.length > 0) {
@@ -722,6 +1009,7 @@ async function buildCnOverviewView(
     }
 
     const heroList =
+      countData?.presetsHeroUseSummaryList ||
       countData?.heroList ||
       countData?.heroes ||
       countData?.topHeroes ||
@@ -731,9 +1019,16 @@ async function buildCnOverviewView(
       lines.push(`━━━━━━━━━━━━━━━━━━`, `<b>🔥 常用英雄</b>`);
       for (const h of heroList.slice(0, 5)) {
         const hName =
-          pickField(h, ["heroName", "name", "hero_name", "cnName"]) ||
-          "未知英雄";
+          pickField(h, [
+            "heroName",
+            "name",
+            "hero_name",
+            "cnName",
+            "heroGuid",
+            "heroId",
+          ]) || "未知英雄";
         const hGames = pickField(h, [
+          "matchSum",
           "totalCount",
           "matchCount",
           "games",
@@ -741,8 +1036,9 @@ async function buildCnOverviewView(
         ]);
         const hWin = pickField(h, ["winRate", "winRatio", "winPercent"]);
         const hKda = pickField(h, ["kda", "avgKda"]);
+        const hLabel = resolveDashenHeroName(hName) || "未知英雄";
         lines.push(
-          `• <b>${escapeHtml(String(hName))}</b>：${hGames !== undefined ? `${formatNum(hGames)}场 | ` : ""}胜率 ${formatRate(hWin)}${hKda !== undefined ? ` | KDA ${formatNum(hKda, 2)}` : ""}`
+          `• <b>${escapeHtml(hLabel)}</b>：${hGames !== undefined ? `${formatNum(hGames)}场 | ` : ""}胜率 ${formatRate(hWin)}${hKda !== undefined ? ` | KDA ${formatNum(hKda, 2)}` : ""}`
         );
       }
     }
@@ -789,17 +1085,15 @@ async function buildCnMatchListView(
 
   const matches: any[] = Array.isArray(listBody)
     ? listBody
-    : listBody?.list ||
-      listBody?.matchList ||
-      listBody?.records ||
-      listBody?.items ||
-      [];
+    : Array.isArray(listBody?.matchList)
+      ? listBody.matchList
+      : listBody?.list || listBody?.records || listBody?.items || [];
 
   const modeLabel = gameMode === "sport" ? "⚔️ 竞技" : "⚡ 快速";
   const lines: string[] = [
     `📋 <b>${escapeHtml(player.nickname)} — 近期战绩（第 ${page} 页）</b>`,
     `模式：${modeLabel}  |  国服`,
-    `<i>说明：数字格式为 消灭/阵亡/助攻（部分接口未返回胜负或地图名时会标注提示）</i>`,
+    `<i>说明：数字格式为 消灭/助攻/阵亡（含比分与时间戳）</i>`,
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
@@ -817,32 +1111,32 @@ async function buildCnMatchListView(
         pickDeepField(m, ["matchId", "match_id", "id", "battleId"]) || ""
       );
       const mapName = parseMatchMapName(m);
-      const heroName = String(
-        pickDeepField(m, [
-          "heroName",
-          "hero_name",
-          "hero",
-          "mostHeroName",
-          "mainHeroName",
-        ]) || ""
-      );
+      const heroName = parseMatchHeroLabel(m);
       const resultBadge = parseMatchResultBadge(m);
 
+      const teamScore = pickDeepField(m, ["teamScore", "myScore"]);
+      const oppScore = pickDeepField(m, ["opponentScore", "enemyScore"]);
+      const scoreStr =
+        teamScore !== undefined && oppScore !== undefined
+          ? ` [${formatNum(teamScore)}:${formatNum(oppScore)}]`
+          : "";
+
       const kills = pickDeepField(m, [
+        "kill",
         "eliminations",
         "kills",
-        "kill",
         "elim",
         "elimNum",
       ]);
-      const deaths = pickDeepField(m, ["deaths", "death", "deathNum"]);
-      const assists = pickDeepField(m, ["assists", "assist", "assistNum"]);
+      const assists = pickDeepField(m, ["assist", "assists", "assistNum"]);
+      const deaths = pickDeepField(m, ["death", "deaths", "deathNum"]);
       const kdaStr =
-        kills !== undefined || deaths !== undefined
-          ? ` <b>${formatNum(kills)}/${formatNum(deaths)}${assists !== undefined ? `/${formatNum(assists)}` : ""}</b>`
+        kills !== undefined || assists !== undefined || deaths !== undefined
+          ? ` <b>${formatNum(kills)}/${formatNum(assists)}/${formatNum(deaths)}</b>`
           : "";
       const timeStr = formatTimestamp(
         pickDeepField(m, [
+          "beginTs",
           "endTime",
           "createTime",
           "matchTime",
@@ -852,7 +1146,7 @@ async function buildCnMatchListView(
       );
 
       lines.push(
-        `<b>${i + 1}.</b> ${resultBadge} <b>${escapeHtml(mapName)}</b>${heroName ? ` · ${escapeHtml(heroName)}` : ""}${kdaStr}${timeStr ? `  <i>(${timeStr})</i>` : ""}`
+        `<b>${i + 1}.</b> ${resultBadge}${scoreStr} <b>${escapeHtml(mapName)}</b>${heroName ? ` · ${escapeHtml(heroName)}` : ""}${kdaStr}${timeStr ? `  <i>(${timeStr})</i>` : ""}`
       );
 
       if (matchId) {
