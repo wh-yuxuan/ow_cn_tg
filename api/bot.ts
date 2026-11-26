@@ -2,7 +2,7 @@
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（独立部署版）
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
- * 数据来源：网易大神上游接口 (datamsapi.ds.163.com) + DeepSeek AI 锐评
+ * 数据来源：网易大神上游接口 (datamsapi.ds.163.com/v1/a19ld5tool) + DeepSeek AI 锐评
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -26,12 +26,22 @@ const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+const DASHEN_API_ROOT =
+  process.env.DASHEN_API_ROOT?.replace(/\/+$/, "") ||
+  "https://datamsapi.ds.163.com/v1/a19ld5tool";
 const DASHEN_CUSTOMER_API_BASE =
   process.env.DASHEN_CUSTOMER_API_BASE?.replace(/\/+$/, "") ||
-  "https://datamsapi.ds.163.com/api/overwatch/customer";
+  `${DASHEN_API_ROOT}/customer`;
 const SEARCH_BNET_ACCOUNT_URL =
   process.env.SEARCH_BNET_ACCOUNT_URL ||
-  "https://datamsapi.ds.163.com/v1/a19ld5tool/searchBnetAccount";
+  `${DASHEN_API_ROOT}/searchBnetAccount`;
+const SEARCH_BNET_METHOD =
+  (process.env.SEARCH_BNET_METHOD || "POST").trim().toUpperCase() === "GET"
+    ? "GET"
+    : "POST";
+const SEARCH_BNET_PARAM_KEY = (
+  process.env.SEARCH_BNET_PARAM_KEY || "name"
+).trim();
 
 const AI_BASE_URL = (
   process.env.AI_BASE_URL || "https://api.deepseek.com"
@@ -902,24 +912,30 @@ async function dashenRequest<T = any>(
   }
 
   if (!response.ok) {
+    const errMsgFromBody =
+      payload?.msg || payload?.message || (payload as any)?.error_msg;
     console.warn("[Dashen Upstream HTTP Error]", {
       method,
       url: url.toString(),
       status: response.status,
-      payloadMsg: payload?.msg || payload?.message,
+      payloadMsg: errMsgFromBody,
       rawTextPreview: rawText.slice(0, 300),
       region: process.env.VERCEL_REGION || "unknown",
     });
     if (response.status === 404) {
       const targetName = String(
-        options?.json?.name || url.searchParams.get("name") || ""
+        options?.json?.[SEARCH_BNET_PARAM_KEY] ||
+          options?.json?.name ||
+          url.searchParams.get(SEARCH_BNET_PARAM_KEY) ||
+          url.searchParams.get("name") ||
+          ""
       );
       throw new DashenError(
         404,
-        `❌ 网易大神未找到对应数据（HTTP 404）。请确认战网 ID <code>${escapeHtml(targetName)}</code> 拼写无误且已同步至网易大神。`
+        `❌ 网易大神接口返回 404（${escapeHtml(String(errMsgFromBody || "Route Not Found"))}）。请确认搜索接口路径、登录凭证或战网 ID <code>${escapeHtml(targetName)}</code>。`
       );
     }
-    const reason = payload.msg || payload.message || `HTTP ${response.status}`;
+    const reason = errMsgFromBody || `HTTP ${response.status}`;
     throw new DashenError(
       response.status,
       `❌ 上游接口错误：${escapeHtml(String(reason))}`
@@ -951,13 +967,24 @@ async function dashenRequest<T = any>(
 /** 1. 搜索国服战网账号并解析 customer_token */
 async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
   const normalized = bnet.replace("＃", "#").trim();
+  if (SEARCH_BNET_METHOD === "GET") {
+    return dashenRequest("GET", SEARCH_BNET_ACCOUNT_URL, {
+      params: {
+        token: DASHEN_TOKEN,
+        roleId: DASHEN_ROLE_ID,
+        dts: DASHEN_DTS,
+        server: DASHEN_SERVER,
+        [SEARCH_BNET_PARAM_KEY]: normalized,
+      },
+    });
+  }
   return dashenRequest("POST", SEARCH_BNET_ACCOUNT_URL, {
     json: {
       token: DASHEN_TOKEN,
       roleId: DASHEN_ROLE_ID,
       dts: DASHEN_DTS,
       server: DASHEN_SERVER,
-      name: normalized,
+      [SEARCH_BNET_PARAM_KEY]: normalized,
     },
   });
 }
