@@ -655,7 +655,6 @@ const DASHEN_MAP_NAMES: Record<string, string> = {
   "0x080000000000102c": "霓虹枢纽",
   "576460752303427381": "阿特利斯",
   "0x0800000000000f35": "阿特利斯",
-  // 补充 query_tool.json 未收录或新增地图 GUID 兼容
   "576460752303428538": "国服新/未收录地图(576460752303428538)",
 };
 
@@ -678,6 +677,32 @@ const DASHEN_STAT_GUID_NAMES: Record<string, string> = {
   "603482350067648392": "助攻",
   "603482350067648623": "英雄获胜",
 };
+
+/** 英文/拼音段位名 -> 中文段位名（对齐 query_tool.json rankList 与 chara.py RANK_DIST） */
+const DASHEN_RANK_NAME_CN: Record<string, string> = {
+  bronze: "青铜",
+  silver: "白银",
+  gold: "黄金",
+  platinum: "白金",
+  platium: "白金",
+  emerald: "翡翠",
+  diamond: "钻石",
+  master: "大师",
+  grandmaster: "宗师",
+  gm: "宗师",
+  champion: "英杰",
+};
+
+function translateRankName(rawRank: any): string {
+  if (rawRank === undefined || rawRank === null) return "";
+  const str = String(rawRank).trim();
+  if (!str) return "";
+  const lower = str.toLowerCase();
+  if (["none", "null", "undefined", "unranked", "无", "未知"].includes(lower)) {
+    return "";
+  }
+  return DASHEN_RANK_NAME_CN[lower] || str;
+}
 
 function resolveDashenHeroName(raw: any): string {
   if (raw === undefined || raw === null) return "";
@@ -1373,17 +1398,33 @@ async function buildCnOverviewView(
           return `• ${escapeHtml(roleLabel)}：<b>未定级</b>（暂无场次）`;
         }
         const lastRank = r?.lastRankInfo || r?.rankInfo || r;
-        const rName = pickField(lastRank, [
+        const rawRankName = pickField(lastRank, [
           "rankName",
           "rank_name",
           "tierName",
           "divisionName",
           "rank",
         ]);
-        const rSub = pickField(lastRank, ["rankSubTier", "rank_sub_tier"]);
-        const rScore = pickField(lastRank, ["rankScore", "rank_score"]);
-        const tierText = rName
-          ? `${rName}${rSub !== undefined && rSub !== null ? ` ${rSub}` : ""}${rScore !== undefined && rScore !== null ? ` (${rScore}分)` : ""}`
+        const rNameCn = translateRankName(rawRankName);
+        const rawSub = pickField(lastRank, ["rankSubTier", "rank_sub_tier"]);
+        const subNum = Number(rawSub);
+        const hasSubTier =
+          rawSub !== undefined &&
+          rawSub !== null &&
+          String(rawSub).trim() !== "" &&
+          Number.isFinite(subNum) &&
+          subNum > 0;
+        const rawScore = pickField(lastRank, ["rankScore", "rank_score"]);
+        const scoreNum = Number(rawScore);
+        const hasScore =
+          rawScore !== undefined &&
+          rawScore !== null &&
+          String(rawScore).trim() !== "" &&
+          Number.isFinite(scoreNum) &&
+          scoreNum > 0;
+
+        const tierText = rNameCn
+          ? `${rNameCn}${hasSubTier ? ` ${subNum}` : ""}${hasScore ? ` (${scoreNum}分)` : ""}`
           : "未定级";
         const rMatches = pickField(r, ["matchSum", "matches"]);
         const rWin = pickField(r, ["winRate", "win_rate"]);
@@ -1423,10 +1464,10 @@ async function buildCnOverviewView(
       ]);
       const open = pickField(cardData, ["openRank", "freeRank", "openTier"]);
       if (tank || dps || sup || open) {
-        rankLines.push(`• 🛡 坦克：<b>${escapeHtml(String(tank || "未定级"))}</b>`);
-        rankLines.push(`• ⚔️ 输出：<b>${escapeHtml(String(dps || "未定级"))}</b>`);
-        rankLines.push(`• 💉 支援：<b>${escapeHtml(String(sup || "未定级"))}</b>`);
-        rankLines.push(`• 🎲 开放：<b>${escapeHtml(String(open || "未定级"))}</b>`);
+        rankLines.push(`• 🛡 坦克：<b>${escapeHtml(translateRankName(tank) || "未定级")}</b>`);
+        rankLines.push(`• ⚔️ 输出：<b>${escapeHtml(translateRankName(dps) || "未定级")}</b>`);
+        rankLines.push(`• 💉 支援：<b>${escapeHtml(translateRankName(sup) || "未定级")}</b>`);
+        rankLines.push(`• 🎲 开放：<b>${escapeHtml(translateRankName(open) || "未定级")}</b>`);
       }
     }
   }
