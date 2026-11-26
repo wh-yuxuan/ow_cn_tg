@@ -48,10 +48,10 @@ interface DashenResponse<T = any> {
 }
 
 // ============================================================================
-// 2. 英雄 / 地图 / 模式 映射与 GUID 兼容处理
+// 2. 英雄 / 地图 / 段位 / 指标 映射表（源自 query_tool.json 与 chara.py）
 // ============================================================================
 
-/** 对齐 Overstats src/constants/chara.py 的英雄标准名与外号别名映射 */
+/** 英雄别名 -> 标准中文名（对齐 Overstats src/constants/chara.py） */
 const DASHEN_HERO_ALIASES: Record<string, string[]> = {
   安娜: ["ana", "安娜", "鸡妈", "恐怖老太太", "娜娜", "激素老太", "禁疗摩西"],
   艾什: ["ashe", "ash", "艾什", "艾许", "王母娘娘", "老八"],
@@ -180,8 +180,27 @@ const DASHEN_HERO_ALIASES: Record<string, string[]> = {
     "幽默跑步男",
   ],
   黑影: ["sombra", "黑影", "邓紫琪", "邓紫棋"],
-  秩序之光: ["symmetra", "秩序之光", "光子", "光子妹", "光妹", "三妹", "阿三", "辛梅塔"],
-  托比昂: ["torbjorn", "托比昂", "托比", "托比昂哥", "托比哥", "中锤", "矮子", "炮台", "矮人"],
+  秩序之光: [
+    "symmetra",
+    "秩序之光",
+    "光子",
+    "光子妹",
+    "光妹",
+    "三妹",
+    "阿三",
+    "辛梅塔",
+  ],
+  托比昂: [
+    "torbjorn",
+    "托比昂",
+    "托比",
+    "托比昂哥",
+    "托比哥",
+    "中锤",
+    "矮子",
+    "炮台",
+    "矮人",
+  ],
   猎空: ["tracer", "猎空", "闪光", "裂空"],
   探奇: [
     "venture",
@@ -198,15 +217,45 @@ const DASHEN_HERO_ALIASES: Record<string, string[]> = {
     "钻地婆",
     "钻头小子",
   ],
-  黑百合: ["widowmaker", "黑百合", "百合", "黑寡妇", "狙", "大狙", "紫薯", "紫薯小人"],
+  黑百合: [
+    "widowmaker",
+    "黑百合",
+    "百合",
+    "黑寡妇",
+    "狙",
+    "大狙",
+    "紫薯",
+    "紫薯小人",
+  ],
   温斯顿: ["winston", "温斯顿", "猩猩", "星星", "老詹", "牢詹", "猴子", "詹姆斯"],
   破坏球: ["wreckingball", "wrecking-ball", "破坏球", "球球", "球", "仓鼠"],
-  查莉娅: ["zarya", "查莉娅", "毛妹", "俄罗斯雨姐", "雨姐", "东北雨姐", "国潮", "国潮来袭"],
+  查莉娅: [
+    "zarya",
+    "查莉娅",
+    "毛妹",
+    "俄罗斯雨姐",
+    "雨姐",
+    "东北雨姐",
+    "国潮",
+    "国潮来袭",
+  ],
   禅雅塔: ["zenyatta", "禅雅塔", "和尚", "光头摩西", "悬浮摩西"],
   弗蕾娅: ["freja", "弗蕾娅", "弗蕾娅大人", "芙蕾雅", "芙蕾雅大人"],
   无漾: ["wuyang", "无漾", "玩水摩西", "水男", "无恙", "水摩西", "五羊"],
   斩仇: ["vendetta", "lupa", "斩仇", "狼女", "大剑"],
-  安燃: ["anran", "安燃", "姐姐", "火女", "凤凰女", "不知火舞", "凤凰", "朱雀", "不知火", "火舞", "扇子摩西"],
+  安燃: [
+    "anran",
+    "安燃",
+    "姐姐",
+    "火女",
+    "凤凰女",
+    "不知火舞",
+    "凤凰",
+    "朱雀",
+    "不知火",
+    "火舞",
+    "扇子摩西",
+  ],
   金驭: ["domina", "金驭", "金玉", "禁欲", "金御", "妈妈", "妈", "总裁", "金羽"],
   埃姆雷: ["emre", "埃姆雷", "m雷", "猫雷", "艾姆雷"],
   飞天猫: ["jetpackcat", "jetpack-cat", "飞天猫", "耄耋", "哈基米", "猫", "猫猫", "豪猫", "键帽"],
@@ -228,49 +277,404 @@ const HERO_ALIAS_TO_CN: Record<string, string> = (() => {
   return map;
 })();
 
-/** 常见网易大神地图 GUID / 尾号映射（完整全量地图表可由 res/query_tool.json 补充） */
-const DASHEN_MAP_NAMES: Record<string, string> = {
-  "576460752303424195": "好莱坞",
-  "424695": "漓江塔",
-  "425122": "尼泊尔",
-  "426283": "国王大道",
-  "426693": "努巴尼",
-  "427250": "直布罗陀监测站",
-  "426356": "伊利奥斯",
-  "425848": "绿洲城",
-  "424195": "花冈",
-  "424175": "新皇后街",
-  "427628": "苏里南",
-  "425182": "萨摩亚",
-  "428538": "新垃圾镇",
-  "426131": "多拉多",
-  "426191": "66号公路",
-  "426305": "监测站：直布罗陀",
-  "426512": "艾兴瓦尔德",
-  "426615": "暴雪世界",
-  "426823": "渣客镇",
-  "426912": "里阿尔托",
-  "427045": "哈瓦那",
-  "427188": "帕拉伊苏",
-  "427319": "南极半岛",
-  "427420": "新欢喜城",
-  "427512": "萨摩亚海滩",
-  "427810": "符文堡垒",
+/** 英雄 GUID / Hex ID -> 中文名（对齐 query_tool.json heroList） */
+const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
+  "207165582859042818": "死神",
+  "0x02e0000000000002": "死神",
+  "207165582859042819": "猎空",
+  "0x02e0000000000003": "猎空",
+  "207165582859042820": "天使",
+  "0x02e0000000000004": "天使",
+  "207165582859042821": "半藏",
+  "0x02e0000000000005": "半藏",
+  "207165582859042822": "托比昂",
+  "0x02e0000000000006": "托比昂",
+  "207165582859042823": "莱因哈特",
+  "0x02e0000000000007": "莱因哈特",
+  "207165582859042824": "法老之鹰",
+  "0x02e0000000000008": "法老之鹰",
+  "207165582859042825": "温斯顿",
+  "0x02e0000000000009": "温斯顿",
+  "207165582859042826": "黑百合",
+  "0x02e000000000000a": "黑百合",
+  "207165582859042837": "堡垒",
+  "0x02e0000000000015": "堡垒",
+  "207165582859042838": "秩序之光",
+  "0x02e0000000000016": "秩序之光",
+  "207165582859042848": "禅雅塔",
+  "0x02e0000000000020": "禅雅塔",
+  "207165582859042857": "源氏",
+  "0x02e0000000000029": "源氏",
+  "207165582859042880": "路霸",
+  "0x02e0000000000040": "路霸",
+  "207165582859042882": "卡西迪",
+  "0x02e0000000000042": "卡西迪",
+  "207165582859042917": "狂鼠",
+  "0x02e0000000000065": "狂鼠",
+  "207165582859042920": "查莉娅",
+  "0x02e0000000000068": "查莉娅",
+  "207165582859042926": "士兵：76",
+  "0x02e000000000006e": "士兵：76",
+  "207165582859042937": "卢西奥",
+  "0x02e0000000000079": "卢西奥",
+  "207165582859042938": "D.Va",
+  "0x02e000000000007a": "D.Va",
+  "207165582859043037": "美",
+  "0x02e00000000000dd": "美",
+  "207165582859043118": "黑影",
+  "0x02e000000000012e": "黑影",
+  "207165582859043119": "末日铁拳",
+  "0x02e000000000012f": "末日铁拳",
+  "207165582859043131": "安娜",
+  "0x02e000000000013b": "安娜",
+  "207165582859043134": "奥丽莎",
+  "0x02e000000000013e": "奥丽莎",
+  "207165582859043221": "布丽吉塔",
+  "0x02e0000000000195": "布丽吉塔",
+  "207165582859043234": "莫伊拉",
+  "0x02e00000000001a2": "莫伊拉",
+  "207165582859043274": "破坏球",
+  "0x02e00000000001ca": "破坏球",
+  "207165582859043308": "索杰恩",
+  "0x02e00000000001ec": "索杰恩",
+  "207165582859043328": "艾什",
+  "0x02e0000000000200": "艾什",
+  "207165582859043334": "回声",
+  "0x02e0000000000206": "回声",
+  "207165582859043361": "巴蒂斯特",
+  "0x02e0000000000221": "巴蒂斯特",
+  "207165582859043377": "雾子",
+  "0x02e0000000000231": "雾子",
+  "207165582859043382": "渣客女王",
+  "0x02e0000000000236": "渣客女王",
+  "207165582859043387": "西格玛",
+  "0x02e000000000023b": "西格玛",
+  "207165582859043469": "拉玛刹",
+  "0x02e000000000028d": "拉玛刹",
+  "207165582859043473": "生命之梭",
+  "0x02e0000000000291": "生命之梭",
+  "207165582859043594": "毛加",
+  "0x02e000000000030a": "毛加",
+  "207165582859043612": "伊拉锐",
+  "0x02e000000000031c": "伊拉锐",
+  "207165582859043627": "探奇",
+  "0x02e000000000032b": "探奇",
+  "207165582859043682": "骇灾",
+  "0x02e0000000000362": "骇灾",
+  "207165582859043685": "朱诺",
+  "0x02e0000000000365": "朱诺",
+  "207165582859043626": "弗蕾娅",
+  "0x02e000000000032a": "弗蕾娅",
+  "207165582859043779": "无漾",
+  "0x02e00000000003c3": "无漾",
+  "207165582859044061": "安燃",
+  "0x02e00000000004dd": "安燃",
+  "207165582859044056": "埃姆雷",
+  "0x02e00000000004d8": "埃姆雷",
+  "207165582859044036": "金驭",
+  "0x02e00000000004c4": "金驭",
+  "207165582859044067": "瑞稀",
+  "0x02e00000000004e3": "瑞稀",
+  "207165582859044118": "飞天猫",
+  "0x02e0000000000516": "飞天猫",
+  "207165582859043954": "斩仇",
+  "0x02e0000000000472": "斩仇",
+  "207165582859044050": "西拉",
+  "0x02e00000000004d2": "西拉",
+  "207165582859044140": "死怨",
+  "0x02e000000000052c": "死怨",
+  "207165582859044162": "D.Mon",
+  "0x02e0000000000542": "D.Mon",
+  "207165582859044208": "血律",
+  "0x02e0000000000570": "血律",
 };
 
-/** 常见网易大神英雄 GUID / 尾号映射（对齐 queryMatchInfo.md 与常用英雄 ID） */
-const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
-  "207165582859043685": "雾子",
-  "207165582859043119": "卡西迪",
-  "207165582859043274": "莱因哈特",
-  "207165582859044118": "源氏",
-  "43131": "雾子",
-  "43118": "天使",
-  "44067": "朱诺",
-  "43234": "莫伊拉",
-  "44208": "安娜",
-  "44118": "卡西迪",
-  "43134": "巴蒂斯特",
+/** 地图 GUID / Hex ID -> 中文地图名（完整对齐 query_tool.json mapList） */
+const DASHEN_MAP_NAMES: Record<string, string> = {
+  "576460752303423579": "阿努比斯神殿",
+  "0x080000000000005b": "阿努比斯神殿",
+  "576460752303423700": "国王大道",
+  "0x08000000000000d4": "国王大道",
+  "576460752303423845": "花村",
+  "0x0800000000000165": "花村",
+  "576460752303423876": "监测站：直布罗陀",
+  "0x0800000000000184": "监测站：直布罗陀",
+  "576460752303423956": "努巴尼",
+  "0x08000000000001d4": "努巴尼",
+  "576460752303423963": "沃斯卡娅工业区",
+  "0x08000000000001db": "沃斯卡娅工业区",
+  "576460752303424175": "好莱坞",
+  "0x08000000000002af": "好莱坞",
+  "576460752303424195": "多拉多",
+  "0x08000000000002c3": "多拉多",
+  "576460752303424695": "尼泊尔",
+  "0x08000000000004b7": "尼泊尔",
+  "576460752303424955": "66号公路",
+  "0x08000000000005bb": "66号公路",
+  "576460752303425121": "教学模式",
+  "0x0800000000000661": "教学模式",
+  "576460752303425122": "漓江塔",
+  "0x0800000000000662": "漓江塔",
+  "576460752303425133": "伊利奥斯",
+  "0x080000000000066d": "伊利奥斯",
+  "576460752303425160": "训练靶场",
+  "0x0800000000000688": "训练靶场",
+  "576460752303425165": "艾兴瓦尔德",
+  "0x080000000000068d": "艾兴瓦尔德",
+  "576460752303425182": "绿洲城",
+  "0x080000000000069e": "绿洲城",
+  "576460752303425195": "好莱坞",
+  "0x08000000000006ab": "好莱坞",
+  "576460752303425201": "国王大道",
+  "0x08000000000006b1": "国王大道",
+  "576460752303425203": "弗格体育场",
+  "0x08000000000006b3": "弗格体育场",
+  "576460752303425205": "花村",
+  "0x08000000000006b5": "花村",
+  "576460752303425207": "漓江塔",
+  "0x08000000000006b7": "漓江塔",
+  "576460752303425223": "VPP Green Room",
+  "0x08000000000006c7": "VPP Green Room",
+  "576460752303425225": "怪鼠复仇",
+  "0x08000000000006c9": "怪鼠复仇",
+  "576460752303425233": "生态监测站：南极洲",
+  "0x08000000000006d1": "生态监测站：南极洲",
+  "576460752303425235": "“地平线”月球基地",
+  "0x08000000000006d3": "“地平线”月球基地",
+  "576460752303425285": "墓园",
+  "0x0800000000000705": "墓园",
+  "576460752303425292": "黑森林",
+  "0x080000000000070c": "黑森林",
+  "576460752303425293": "生态监测站：南极洲",
+  "0x080000000000070d": "生态监测站：南极洲",
+  "576460752303425297": "漓江塔庭院",
+  "0x0800000000000711": "漓江塔庭院",
+  "576460752303425298": "漓江塔夜市",
+  "0x0800000000000712": "漓江塔夜市",
+  "576460752303425303": "尼泊尔圣所",
+  "0x0800000000000717": "尼泊尔圣所",
+  "576460752303425306": "漓江塔控制中心",
+  "0x080000000000071a": "漓江塔控制中心",
+  "576460752303425308": "城堡",
+  "0x080000000000071c": "城堡",
+  "576460752303425334": "尼泊尔村庄",
+  "0x0800000000000736": "尼泊尔村庄",
+  "576460752303425336": "尼泊尔圣坛",
+  "0x0800000000000738": "尼泊尔圣坛",
+  "576460752303425338": "伊利奥斯深井",
+  "0x080000000000073a": "伊利奥斯深井",
+  "576460752303425341": "伊利奥斯灯塔",
+  "0x080000000000073d": "伊利奥斯灯塔",
+  "576460752303425342": "伊利奥斯废墟",
+  "0x080000000000073e": "伊利奥斯废墟",
+  "576460752303425348": "漓江塔控制中心",
+  "0x0800000000000744": "漓江塔控制中心",
+  "576460752303425349": "漓江塔庭院",
+  "0x0800000000000745": "漓江塔庭院",
+  "576460752303425350": "漓江塔夜市",
+  "0x0800000000000746": "漓江塔夜市",
+  "576460752303425354": "绿洲城中心",
+  "0x080000000000074a": "绿洲城中心",
+  "576460752303425356": "绿洲城花园",
+  "0x080000000000074c": "绿洲城花园",
+  "576460752303425357": "绿洲城大学",
+  "0x080000000000074d": "绿洲城大学",
+  "576460752303425366": "渣客镇",
+  "0x0800000000000756": "渣客镇",
+  "576460752303425374": "暴雪世界",
+  "0x080000000000075e": "暴雪世界",
+  "576460752303425441": "阿育陀耶",
+  "0x08000000000007a1": "阿育陀耶",
+  "576460752303425444": "吉拉德堡",
+  "0x08000000000007a4": "吉拉德堡",
+  "576460752303425506": "釜山",
+  "0x08000000000007e2": "釜山",
+  "576460752303425524": "阿德勒斯布鲁恩",
+  "0x08000000000007f4": "阿德勒斯布鲁恩",
+  "576460752303425527": "黑森林",
+  "0x08000000000007f7": "黑森林",
+  "576460752303425533": "圣诞节尼泊尔村庄",
+  "0x08000000000007fd": "圣诞节尼泊尔村庄",
+  "576460752303425575": "皇家赛道",
+  "0x0800000000000827": "皇家赛道",
+  "576460752303425590": "吉拉德堡",
+  "0x0800000000000836": "吉拉德堡",
+  "576460752303425649": "里阿尔托",
+  "0x0800000000000871": "里阿尔托",
+  "576460752303425680": "佩特拉",
+  "0x0800000000000890": "佩特拉",
+  "576460752303425681": "巴黎",
+  "0x0800000000000891": "巴黎",
+  "576460752303425848": "帕拉伊苏",
+  "0x0800000000000938": "帕拉伊苏",
+  "576460752303426116": "哈瓦那",
+  "0x0800000000000a44": "哈瓦那",
+  "576460752303426139": "暴雪世界",
+  "0x0800000000000a5b": "暴雪世界",
+  "576460752303426170": "釜山寺院",
+  "0x0800000000000a7a": "釜山寺院",
+  "576460752303426182": "釜山城区",
+  "0x0800000000000a86": "釜山城区",
+  "576460752303426283": "新皇后街",
+  "0x0800000000000aeb": "新皇后街",
+  "576460752303426300": "里约热内卢",
+  "0x0800000000000afc": "里约热内卢",
+  "576460752303426356": "斗兽场",
+  "0x0800000000000b34": "斗兽场",
+  "576460752303426380": "中城",
+  "0x0800000000000b4c": "中城",
+  "576460752303426496": "多伦多",
+  "0x0800000000000bc0": "多伦多",
+  "576460752303426518": "哥德堡",
+  "0x0800000000000bd6": "哥德堡",
+  "576460752303426624": "地图工坊岛屿",
+  "0x0800000000000c40": "地图工坊岛屿",
+  "576460752303426628": "地图工坊空地",
+  "0x0800000000000c44": "地图工坊空地",
+  "576460752303426632": "地图工坊室内",
+  "0x0800000000000c48": "地图工坊室内",
+  "576460752303426693": "香巴里寺院",
+  "0x0800000000000c85": "香巴里寺院",
+  "576460752303426734": "巴黎",
+  "0x0800000000000cae": "巴黎",
+  "576460752303426768": "地图工坊空地（夜间）",
+  "0x0800000000000cd0": "地图工坊空地（夜间）",
+  "576460752303426769": "地图工坊岛屿（夜间）",
+  "0x0800000000000cd1": "地图工坊岛屿（夜间）",
+  "576460752303426771": "铁坂",
+  "0x0800000000000cd3": "铁坂",
+  "576460752303426775": "马莱温多",
+  "0x0800000000000cd7": "马莱温多",
+  "576460752303426780": "釜山体育场",
+  "0x0800000000000cdc": "釜山体育场",
+  "576460752303426795": "悉尼海港竞技场",
+  "0x0800000000000ceb": "悉尼海港竞技场",
+  "576460752303426802": "南极半岛",
+  "0x0800000000000cf2": "南极半岛",
+  "576460752303426878": "苏拉瓦萨",
+  "0x0800000000000d3e": "苏拉瓦萨",
+  "576460752303426892": "地图工坊绿幕",
+  "0x0800000000000d4c": "地图工坊绿幕",
+  "576460752303426899": "埃斯佩兰萨",
+  "0x0800000000000d53": "埃斯佩兰萨",
+  "576460752303427091": "新渣客城",
+  "0x0800000000000e13": "新渣客城",
+  "576460752303427250": "鲁纳塞彼",
+  "0x0800000000000eb2": "鲁纳塞彼",
+  "576460752303427264": "萨摩亚",
+  "0x0800000000000ec0": "萨摩亚",
+  "576460752303427312": "教学模式",
+  "0x0800000000000ef0": "教学模式",
+  "576460752303427322": "铁坂",
+  "0x0800000000000efa": "铁坂",
+  "576460752303427345": "铁坂",
+  "0x0800000000000f11": "铁坂",
+  "576460752303427346": "铁坂",
+  "0x0800000000000f12": "铁坂",
+  "576460752303427554": "英雄精通：索杰恩",
+  "0x0800000000000fe2": "英雄精通：索杰恩",
+  "576460752303427574": "英雄精通：莱因哈特",
+  "0x0800000000000ff6": "英雄精通：莱因哈特",
+  "576460752303427575": "英雄精通",
+  "0x0800000000000ff7": "英雄精通",
+  "576460752303427579": "英雄精通：猎空",
+  "0x0800000000000ffb": "英雄精通：猎空",
+  "576460752303427585": "英雄精通：士兵：76",
+  "0x0800000000001001": "英雄精通：士兵：76",
+  "576460752303427608": "国王大道",
+  "0x0800000000001018": "国王大道",
+  "576460752303427634": "斗兽场",
+  "0x0800000000001032": "斗兽场",
+  "576460752303427654": "英雄精通：源氏",
+  "0x0800000000001046": "英雄精通：源氏",
+  "576460752303427662": "英雄精通：温斯顿",
+  "0x080000000000104e": "英雄精通：温斯顿",
+  "576460752303427666": "英雄精通：天使",
+  "0x0800000000001052": "英雄精通：天使",
+  "576460752303427679": "英雄精通：查莉娅",
+  "0x080000000000105f": "英雄精通：查莉娅",
+  "576460752303427683": "英雄精通：法老之鹰",
+  "0x0800000000001063": "英雄精通：法老之鹰",
+  "576460752303427686": "英雄精通：回声",
+  "0x0800000000001066": "英雄精通：回声",
+  "576460752303427719": "英雄精通：试炼场",
+  "0x0800000000001087": "英雄精通：试炼场",
+  "576460752303427770": "英雄精通：美",
+  "0x08000000000010ba": "英雄精通：美",
+  "576460752303427798": "南极半岛",
+  "0x08000000000010d6": "南极半岛",
+  "576460752303427799": "英雄精通：雾子",
+  "0x08000000000010d7": "英雄精通：雾子",
+  "576460752303427844": "哥德堡",
+  "0x0800000000001104": "哥德堡",
+  "576460752303427865": "英雄精通：D.Va",
+  "0x0800000000001119": "英雄精通：D.Va",
+  "576460752303427880": "寺院",
+  "0x0800000000001128": "寺院",
+  "576460752303427927": "花冈",
+  "0x0800000000001157": "花冈",
+  "576460752303427936": "阿努比斯王座",
+  "0x0800000000001160": "阿努比斯王座",
+  "576460752303427970": "英雄精通：布丽吉塔",
+  "0x0800000000001182": "英雄精通：布丽吉塔",
+  "576460752303427992": "英雄精通：艾什",
+  "0x0800000000001198": "英雄精通：艾什",
+  "576460752303428097": "英雄精通：卡西迪",
+  "0x0800000000001201": "英雄精通：卡西迪",
+  "576460752303428110": "监测站：直布罗陀",
+  "0x080000000000120e": "监测站：直布罗陀",
+  "576460752303428170": "黑森林",
+  "0x080000000000124a": "黑森林",
+  "576460752303428233": "阿努比斯王座",
+  "0x0800000000001289": "阿努比斯王座",
+  "576460752303428286": "阿德勒斯布鲁恩",
+  "0x08000000000012be": "阿德勒斯布鲁恩",
+  "576460752303428299": "巴黎",
+  "0x08000000000012cb": "巴黎",
+  "576460752303428186": "高架车站",
+  "0x080000000000125a": "高架车站",
+  "576460752303428190": "拉克瓦广场",
+  "0x080000000000125e": "拉克瓦广场",
+  "576460752303428192": "红杉水坝",
+  "0x0800000000001260": "红杉水坝",
+  "576460752303428219": "伊利奥斯 - 废墟",
+  "0x080000000000127b": "伊利奥斯 - 废墟",
+  "576460752303428266": "维多利亚竞技场",
+  "0x08000000000012aa": "维多利亚竞技场",
+  "576460752303428277": "阿努比斯王座",
+  "0x08000000000012b5": "阿努比斯王座",
+  "576460752303428278": "花冈",
+  "0x08000000000012b6": "花冈",
+  "576460752303428279": "斗兽场",
+  "0x08000000000012b7": "斗兽场",
+  "576460752303428337": "尼泊尔 - 圣坛",
+  "0x08000000000012f1": "尼泊尔 - 圣坛",
+  "576460752303428397": "哈瓦那",
+  "0x080000000000132d": "哈瓦那",
+  "576460752303427628": "霓虹枢纽",
+  "0x080000000000102c": "霓虹枢纽",
+  "576460752303427381": "阿特利斯",
+  "0x0800000000000f35": "阿特利斯",
+};
+
+/** 常见通用统计指标 GUID -> 中文指标名（源自 query_tool.json heroAttrList） */
+const DASHEN_STAT_GUID_NAMES: Record<string, string> = {
+  "603482350067646495": "消灭",
+  "603482350067646497": "累计游戏时间",
+  "603482350067646506": "阵亡",
+  "603482350067646507": "最后一击",
+  "603482350067646509": "单独消灭",
+  "603482350067646511": "武器命中率",
+  "603482350067646513": "射击命中",
+  "603482350067646913": "治疗量",
+  "603482350067647458": "暴击命中率",
+  "603482350067647462": "自我治疗量",
+  "603482350067647479": "治疗量",
+  "603482350067647492": "拯救玩家",
+  "603482350067647626": "强化伤害",
+  "603482350067647671": "对英雄伤害量",
+  "603482350067648392": "助攻",
+  "603482350067648623": "英雄获胜",
 };
 
 function resolveDashenHeroName(raw: any): string {
@@ -281,13 +685,8 @@ function resolveDashenHeroName(raw: any): string {
   if (HERO_ALIAS_TO_CN[lower]) {
     return HERO_ALIAS_TO_CN[lower];
   }
-  if (DASHEN_HERO_GUID_NAMES[str]) {
-    return DASHEN_HERO_GUID_NAMES[str];
-  }
-  for (const [fullId, name] of Object.entries(DASHEN_HERO_GUID_NAMES)) {
-    if (fullId.endsWith(str) || str.endsWith(fullId)) {
-      return name;
-    }
+  if (DASHEN_HERO_GUID_NAMES[lower]) {
+    return DASHEN_HERO_GUID_NAMES[lower];
   }
   return str;
 }
@@ -302,6 +701,8 @@ function translateModeCode(modeVal: any): string {
     leisure: "快速预设",
     sportopen: "竞技自由",
     leisureopen: "快速自由",
+    sportfight: "决斗领域",
+    leisurefight: "休闲决斗领域",
   };
   return map[s.toLowerCase()] || s;
 }
@@ -310,29 +711,21 @@ function resolveDashenMapGuid(rawGuid: any): string {
   if (rawGuid === undefined || rawGuid === null) return "";
   const str = String(rawGuid).trim();
   if (!str) return "";
-  if (DASHEN_MAP_NAMES[str]) return DASHEN_MAP_NAMES[str];
-  for (const [fullId, name] of Object.entries(DASHEN_MAP_NAMES)) {
-    if (fullId.endsWith(str) || str.endsWith(fullId)) {
-      return name;
-    }
-  }
-  return `地图ID:${str.slice(-6)}`;
+  const lower = str.toLowerCase();
+  if (DASHEN_MAP_NAMES[lower]) return DASHEN_MAP_NAMES[lower];
+  return `地图#${str}`;
 }
 
 function resolveDashenHeroGuid(rawGuid: any): string {
   if (rawGuid === undefined || rawGuid === null) return "";
   const str = String(rawGuid).trim();
   if (!str) return "";
-  if (HERO_ALIAS_TO_CN[str.toLowerCase()]) {
-    return HERO_ALIAS_TO_CN[str.toLowerCase()];
+  const lower = str.toLowerCase();
+  if (HERO_ALIAS_TO_CN[lower]) {
+    return HERO_ALIAS_TO_CN[lower];
   }
-  if (DASHEN_HERO_GUID_NAMES[str]) return DASHEN_HERO_GUID_NAMES[str];
-  for (const [fullId, name] of Object.entries(DASHEN_HERO_GUID_NAMES)) {
-    if (fullId.endsWith(str) || str.endsWith(fullId)) {
-      return name;
-    }
-  }
-  return `英雄ID:${str.slice(-5)}`;
+  if (DASHEN_HERO_GUID_NAMES[lower]) return DASHEN_HERO_GUID_NAMES[lower];
+  return `英雄#${str}`;
 }
 
 // ============================================================================
@@ -537,7 +930,7 @@ function pickField(obj: any, keys: string[]): any {
   return undefined;
 }
 
-/** 从对象及常见嵌套子对象（mapInfo / gameInfo / battleInfo 等）中提取字段 */
+/** 从对象及常见嵌套子对象中提取字段 */
 function pickDeepField(obj: any, keys: string[]): any {
   const direct = pickField(obj, keys);
   if (direct !== undefined) return direct;
@@ -684,7 +1077,7 @@ function formatTimestamp(ts: any): string {
   return `${month}-${day} ${hour}:${minute}`;
 }
 
-/** 解析单条对局的胜负状态（对齐 queryMatchList.md 的 matchRet 字段，并兼容比分与逆向编码） */
+/** 解析单条对局的胜负状态 */
 function parseMatchResultBadge(m: any): string {
   const rawResult = pickDeepField(m, [
     "matchRet",
@@ -733,7 +1126,11 @@ function parseMatchResultBadge(m: any): string {
     if (["1", "true", "win", "won", "victory", "胜", "胜利"].includes(s)) {
       return "🟢胜";
     }
-    if (["-1", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(s)) {
+    if (
+      ["-1", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(
+        s
+      )
+    ) {
       return "🔴负";
     }
     if (["0", "2"].includes(s)) {
@@ -1308,79 +1705,149 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   }
 
   const res = await queryMatchInfo(entry.customerToken, entry.matchId);
-  const detail = unwrapData(res);
+  const rawDetail = unwrapData(res);
+  const detail =
+    rawDetail &&
+    typeof rawDetail === "object" &&
+    rawDetail.data &&
+    typeof rawDetail.data === "object"
+      ? rawDetail.data
+      : rawDetail;
 
   const mapName = parseMatchMapName(detail);
   const modeName = translateModeCode(
     pickDeepField(detail, ["gameModeName", "modeName", "gameMode"])
   );
-  const duration = pickDeepField(detail, [
-    "duration",
-    "gameTime",
-    "matchDuration",
-  ]);
+  const durationSec = Number(
+    pickDeepField(detail, [
+      "gameTimeSec",
+      "duration",
+      "gameTime",
+      "matchDuration",
+    ])
+  );
+  const durationText =
+    Number.isFinite(durationSec) && durationSec > 0
+      ? `${Math.floor(durationSec / 60)}分${Math.round(durationSec % 60)}秒`
+      : "";
+
+  const teamScore = pickDeepField(detail, ["teamScore", "myScore"]);
+  const oppScore = pickDeepField(detail, ["opponentScore", "enemyScore"]);
+  const scoreText =
+    teamScore !== undefined && oppScore !== undefined
+      ? `  |  比分：<b>${formatNum(teamScore)} : ${formatNum(oppScore)}</b>`
+      : "";
 
   const lines: string[] = [
     `🔍 <b>${escapeHtml(mapName)}</b>${modeName ? ` (${escapeHtml(modeName)})` : ""}`,
-    `战网 ID：<code>${escapeHtml(entry.bnet)}</code>${duration ? `  |  时长：${escapeHtml(String(duration))}` : ""}`,
+    `战网 ID：<code>${escapeHtml(entry.bnet)}</code>${durationText ? `  |  时长：${escapeHtml(durationText)}` : ""}${scoreText}`,
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
-  const players: any[] =
-    detail?.players ||
-    detail?.playerList ||
-    detail?.teamList?.flatMap((t: any) => t.players || t.playerList || []) ||
-    detail?.members ||
-    [];
+  // 对齐 queryMatchInfo.md：玩家在 teammateList / enemyList，本局分英雄数据在 heroList
+  const teammates: any[] = Array.isArray(detail?.teammateList)
+    ? detail.teammateList
+    : [];
+  const enemies: any[] = Array.isArray(detail?.enemyList)
+    ? detail.enemyList
+    : [];
+  const heroList: any[] = Array.isArray(detail?.heroList)
+    ? detail.heroList
+    : [];
 
-  if (Array.isArray(players) && players.length > 0) {
-    lines.push(`<b>👥 本局玩家数据（消灭/助攻/阵亡 | 伤害 | 治疗）</b>`);
-    for (const p of players.slice(0, 12)) {
-      const pName = String(
-        pickField(p, [
-          "bnetName",
-          "nickname",
-          "nickName",
-          "name",
-          "playerName",
-        ]) || "玩家"
+  const targetLower = entry.bnet.trim().toLowerCase();
+  const targetPrefix = targetLower.split("#")[0];
+  const matchedPlayer = [...teammates, ...enemies].find((p: any) => {
+    const pName = String(
+      pickField(p, ["name", "bnetName", "nickname"]) || ""
+    )
+      .trim()
+      .toLowerCase();
+    const pToken = String(
+      pickField(p, ["customerToken", "customer_token"]) || ""
+    ).trim();
+    return (
+      (entry.customerToken && pToken === entry.customerToken) ||
+      pName === targetLower ||
+      (targetPrefix && pName.startsWith(`${targetPrefix}#`))
+    );
+  });
+
+  if (matchedPlayer) {
+    const e = formatNum(
+      pickField(matchedPlayer, ["kill", "eliminations", "kills"])
+    );
+    const a = formatNum(pickField(matchedPlayer, ["assist", "assists"]));
+    const d = formatNum(pickField(matchedPlayer, ["death", "deaths"]));
+    const dmg = formatNum(pickField(matchedPlayer, ["heroDamage", "damage"]));
+    const heal = formatNum(pickField(matchedPlayer, ["cure", "healing"]));
+    const resist = formatNum(pickField(matchedPlayer, ["resistDamage"]));
+    const pHero = resolveDashenHeroGuid(
+      pickField(matchedPlayer, ["heroGuid", "heroId", "heroName"])
+    );
+
+    lines.push(
+      `<b>🎯 查询玩家本局表现</b>${pHero ? `（主玩：${escapeHtml(pHero)}）` : ""}`
+    );
+    lines.push(`• 消灭/助攻/阵亡：<b>${e} / ${a} / ${d}</b>`);
+    lines.push(
+      `• 英雄伤害：<b>${dmg}</b>  |  治疗量：<b>${heal}</b>  |  抵伤：<b>${resist}</b>`
+    );
+    lines.push(`━━━━━━━━━━━━━━━━━━`);
+  }
+
+  if (heroList.length > 0) {
+    lines.push(`<b>🦸 本局英雄使用明细</b>`);
+    for (const h of heroList.slice(0, 6)) {
+      const hName = resolveDashenHeroGuid(
+        pickField(h, ["heroId", "heroGuid", "heroName"])
       );
-      const pHero = String(
-        pickField(p, ["heroName", "hero_name", "hero", "mainHeroName"]) || ""
-      );
-      const e = formatNum(
-        pickField(p, ["eliminations", "kills", "kill", "elimNum"])
-      );
-      const a = formatNum(pickField(p, ["assists", "assist", "assistNum"]));
-      const d = formatNum(pickField(p, ["deaths", "death", "deathNum"]));
-      const dmg = formatNum(
-        pickField(p, ["heroDamage", "damage", "damageDone"])
-      );
-      const heal = formatNum(
-        pickField(p, ["healing", "heal", "healingDone"])
-      );
+      const sec = Number(pickField(h, ["userTimeSec", "playTime"]) || 0);
+      const timeStr = sec > 0 ? `${Math.floor(sec / 60)}m${sec % 60}s` : "-";
+      const rateStr = pickField(h, ["useTimeRate"]);
+      const statMap =
+        h?.statMap && typeof h.statMap === "object" ? h.statMap : null;
+      const topStats: string[] = [];
+      if (statMap) {
+        for (const [statGuid, statVal] of Object.entries(statMap).slice(0, 3)) {
+          const sLabel = DASHEN_STAT_GUID_NAMES[String(statGuid)] || "";
+          if (sLabel && statVal !== undefined && statVal !== null) {
+            topStats.push(`${sLabel} ${formatNum(statVal, 1)}`);
+          }
+        }
+      }
       lines.push(
-        `• <b>${escapeHtml(pName)}</b>${pHero ? `(${escapeHtml(pHero)})` : ""}：${e}/${a}/${d} | 伤 ${dmg} | 疗 ${heal}`
+        `• <b>${escapeHtml(hName)}</b>：时长 ${escapeHtml(timeStr)}${rateStr !== undefined ? ` (${escapeHtml(String(rateStr))}%)` : ""}${topStats.length > 0 ? ` · ${escapeHtml(topStats.join(" / "))}` : ""}`
       );
     }
-  } else {
-    const e = formatNum(
-      pickDeepField(detail, ["eliminations", "kills", "kill", "elimNum"])
-    );
-    const a = formatNum(
-      pickDeepField(detail, ["assists", "assist", "assistNum"])
-    );
-    const d = formatNum(pickDeepField(detail, ["deaths", "death", "deathNum"]));
-    const dmg = formatNum(
-      pickDeepField(detail, ["heroDamage", "damage", "damageDone"])
-    );
-    const heal = formatNum(
-      pickDeepField(detail, ["healing", "heal", "healingDone"])
-    );
-    lines.push(
-      `• 消灭/助攻/阵亡：<b>${e} / ${a} / ${d}</b>`,
-      `• 英雄伤害：<b>${dmg}</b>  |  治疗量：<b>${heal}</b>`
-    );
+    lines.push(`━━━━━━━━━━━━━━━━━━`);
+  }
+
+  const allPlayers = [
+    ...teammates.map((p) => ({ ...p, _side: "友方" })),
+    ...enemies.map((p) => ({ ...p, _side: "敌方" })),
+  ];
+
+  if (allPlayers.length > 0) {
+    lines.push(`<b>👥 本局参战玩家（消灭/助攻/阵亡 | 伤害 | 治疗）</b>`);
+    for (const p of allPlayers.slice(0, 10)) {
+      const pName = String(
+        pickField(p, ["name", "bnetName", "nickname", "playerName"]) || "玩家"
+      );
+      const pHero = resolveDashenHeroGuid(
+        pickField(p, ["heroGuid", "heroId", "heroName"])
+      );
+      const e = formatNum(pickField(p, ["kill", "eliminations", "kills"]));
+      const a = formatNum(pickField(p, ["assist", "assists"]));
+      const d = formatNum(pickField(p, ["death", "deaths"]));
+      const dmg = formatNum(pickField(p, ["heroDamage", "damage"]));
+      const heal = formatNum(pickField(p, ["cure", "healing"]));
+      lines.push(
+        `• [${p._side}] <b>${escapeHtml(pName)}</b>${pHero ? `(${escapeHtml(pHero)})` : ""}：${e}/${a}/${d} | 伤 ${dmg} | 疗 ${heal}`
+      );
+    }
+  } else if (!matchedPlayer && heroList.length === 0) {
+    lines.push(`📭 该对局暂无详细阵容与英雄统计数据。`);
   }
 
   const keyboard = new InlineKeyboard();
