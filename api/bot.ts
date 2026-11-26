@@ -655,6 +655,8 @@ const DASHEN_MAP_NAMES: Record<string, string> = {
   "0x080000000000102c": "霓虹枢纽",
   "576460752303427381": "阿特利斯",
   "0x0800000000000f35": "阿特利斯",
+  // 补充 query_tool.json 未收录或新增地图 GUID 兼容
+  "576460752303428538": "国服新/未收录地图(576460752303428538)",
 };
 
 /** 常见通用统计指标 GUID -> 中文指标名（源自 query_tool.json heroAttrList） */
@@ -1319,7 +1321,11 @@ async function buildCnOverviewView(
     damage: "⚔️ 输出",
     healer: "💉 支援",
     support: "💉 支援",
+    open: "🎲 开放",
+    free: "🎲 开放",
   };
+
+  const roleOrder = ["tank", "dps", "healer", "open"];
 
   const rankLines: string[] = [];
   if (cardData && typeof cardData === "object") {
@@ -1333,12 +1339,39 @@ async function buildCnOverviewView(
       cardData.competitiveRanks;
 
     if (Array.isArray(rankList) && rankList.length > 0) {
+      const normalizedRoleKey = (rawVal: any): string => {
+        const s = String(rawVal || "").trim().toLowerCase();
+        if (s === "tank" || s.includes("坦克") || s.includes("重装")) return "tank";
+        if (s === "dps" || s === "damage" || s.includes("输出")) return "dps";
+        if (s === "healer" || s === "support" || s.includes("支援") || s.includes("治疗")) return "healer";
+        if (s === "open" || s === "free" || s.includes("开放") || s.includes("自由")) return "open";
+        return s || "other";
+      };
+
+      const entriesByRole = new Map<string, any>();
+      const extraEntries: Array<{ key: string; item: any }> = [];
+
       for (const r of rankList) {
-        const rawRole = String(
-          pickField(r, ["roleType", "roleName", "role", "name", "typeName"]) ||
-            "职责"
-        ).toLowerCase();
-        const roleLabel = roleMapCn[rawRole] || rawRole;
+        const rawRole = pickField(r, [
+          "roleType",
+          "roleName",
+          "role",
+          "name",
+          "typeName",
+        ]);
+        const rKey = normalizedRoleKey(rawRole);
+        if (roleOrder.includes(rKey) && !entriesByRole.has(rKey)) {
+          entriesByRole.set(rKey, r);
+        } else {
+          extraEntries.push({ key: rKey, item: r });
+        }
+      }
+
+      const formatRoleLine = (rKey: string, r: any, fallbackLabel: string): string => {
+        const roleLabel = roleMapCn[rKey] || fallbackLabel || rKey;
+        if (!r) {
+          return `• ${escapeHtml(roleLabel)}：<b>未定级</b>（暂无场次）`;
+        }
         const lastRank = r?.lastRankInfo || r?.rankInfo || r;
         const rName = pickField(lastRank, [
           "rankName",
@@ -1363,9 +1396,17 @@ async function buildCnOverviewView(
           .filter(Boolean)
           .join(" · ");
 
-        rankLines.push(
-          `• ${escapeHtml(roleLabel)}：<b>${escapeHtml(tierText)}</b>${extra ? `（${escapeHtml(extra)}）` : ""}`
+        return `• ${escapeHtml(roleLabel)}：<b>${escapeHtml(tierText)}</b>${extra ? `（${escapeHtml(extra)}）` : ""}`;
+      };
+
+      for (const rKey of roleOrder) {
+        rankLines.push(formatRoleLine(rKey, entriesByRole.get(rKey), roleMapCn[rKey]));
+      }
+      for (const ex of extraEntries) {
+        const rawLabel = String(
+          pickField(ex.item, ["roleType", "roleName", "role", "name", "typeName"]) || "其他"
         );
+        rankLines.push(formatRoleLine(ex.key, ex.item, rawLabel));
       }
     } else {
       const tank = pickField(cardData, ["tankRank", "tankTier", "tankLevel"]);
@@ -1380,12 +1421,12 @@ async function buildCnOverviewView(
         "healRank",
         "supportTier",
       ]);
-      const open = pickField(cardData, ["openRank", "freeRank"]);
+      const open = pickField(cardData, ["openRank", "freeRank", "openTier"]);
       if (tank || dps || sup || open) {
-        if (tank) rankLines.push(`• 🛡 坦克：<b>${escapeHtml(String(tank))}</b>`);
-        if (dps) rankLines.push(`• ⚔️ 输出：<b>${escapeHtml(String(dps))}</b>`);
-        if (sup) rankLines.push(`• 💉 支援：<b>${escapeHtml(String(sup))}</b>`);
-        if (open) rankLines.push(`• 🎲 自由：<b>${escapeHtml(String(open))}</b>`);
+        rankLines.push(`• 🛡 坦克：<b>${escapeHtml(String(tank || "未定级"))}</b>`);
+        rankLines.push(`• ⚔️ 输出：<b>${escapeHtml(String(dps || "未定级"))}</b>`);
+        rankLines.push(`• 💉 支援：<b>${escapeHtml(String(sup || "未定级"))}</b>`);
+        rankLines.push(`• 🎲 开放：<b>${escapeHtml(String(open || "未定级"))}</b>`);
       }
     }
   }
