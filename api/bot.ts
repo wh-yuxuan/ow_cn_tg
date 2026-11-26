@@ -284,7 +284,6 @@ function extractPlayerFromSearch(
 
   const normalizedInput = bnetInput.replace("＃", "#").trim().toLowerCase();
 
-  // 优先精确匹配战网 ID
   let matched = candidates.find((item) => {
     const name = String(
       pickField(item, [
@@ -361,7 +360,7 @@ function formatTimestamp(ts: any): string {
   const n = Number(ts);
   if (Number.isNaN(n) || n <= 0) return "";
   const ms = n < 1e12 ? n * 1000 : n;
-  const d = new Date(ms + 8 * 3600 * 1000); // 北京时间 UTC+8
+  const d = new Date(ms + 8 * 3600 * 1000);
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(d.getUTCDate()).padStart(2, "0");
   const hh = String(d.getUTCHours()).padStart(2, "0");
@@ -395,7 +394,6 @@ function cacheMatchRef(
     mode,
     expiresAt: Date.now() + 15 * 60 * 1000,
   });
-  // 顺手清理过期缓存
   if (matchCache.size > 200) {
     const now = Date.now();
     for (const [k, v] of matchCache.entries()) {
@@ -439,9 +437,30 @@ async function buildCnOverviewView(
     )
   );
 
+  const levelVal = pickField(cardData, ["level", "endorsementLevel"]);
+  const gameTimeVal = pickField(cardData, ["gameTime", "totalGameTime"]);
+  const totalMatchVal = pickField(cardData, [
+    "totalMatchNum",
+    "matchCount",
+    "totalCount",
+  ]);
+
+  const metaParts: string[] = [`模式：${modeLabel}`];
+  if (levelVal !== undefined) metaParts.push(`赞赏 Lv.${escapeHtml(String(levelVal))}`);
+  if (gameTimeVal !== undefined) {
+    const gtStr =
+      typeof gameTimeVal === "number"
+        ? `${formatNum(gameTimeVal, 1)}h`
+        : escapeHtml(String(gameTimeVal));
+    metaParts.push(`时长 ${gtStr}`);
+  }
+  if (totalMatchVal !== undefined) {
+    metaParts.push(`累计 ${formatNum(totalMatchVal)} 场`);
+  }
+
   const lines: string[] = [
     `🇨🇳 <b>${displayName}</b>（国服）`,
-    `模式：${modeLabel}`,
+    metaParts.join("  |  "),
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
@@ -512,6 +531,7 @@ async function buildCnOverviewView(
       "gamesPlayed",
       "totalGames",
       "gameCount",
+      "totalMatchNum",
     ]);
     const winGames = pickField(statsObj, ["winCount", "gamesWon", "wins"]);
     const winRate = pickField(statsObj, [
@@ -565,7 +585,7 @@ async function buildCnOverviewView(
       lines.push(`<b>📊 赛季汇总战绩</b>`, ...statParts);
     } else {
       lines.push(
-        `📭 已成功拉取该玩家数据，但当前模式下暂无汇总统计（可切换模式，或发送 <code>/debug ${escapeHtml(player.bnet)}</code> 查看原始字段）。`
+        `📭 已成功拉取该玩家数据，但当前模式下暂无汇总统计（可切换模式或查看近期战绩）。`
       );
     }
 
@@ -728,7 +748,6 @@ async function buildCnMatchListView(
     if (detailBtnCount % 4 !== 0) keyboard.row();
   }
 
-  // 分页与切换按钮
   const prevCb = `m:${mCode}:${Math.max(1, page - 1)}:${player.bnet}`;
   const nextCb = `m:${mCode}:${page + 1}:${player.bnet}`;
   const switchCb = `m:${nextM}:1:${player.bnet}`;
@@ -784,7 +803,6 @@ async function buildCnMatchDetailView(refId: string): Promise<{
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
-  // 提取全场玩家或己方/敌方队伍列表
   const players: any[] =
     detail?.players ||
     detail?.playerList ||
@@ -821,7 +839,6 @@ async function buildCnMatchDetailView(refId: string): Promise<{
       );
     }
   } else {
-    // 兜底展示单人核心字段
     const e = formatNum(pickField(detail, ["eliminations", "kills", "kill"]));
     const a = formatNum(pickField(detail, ["assists", "assist"]));
     const d = formatNum(pickField(detail, ["deaths", "death"]));
@@ -858,7 +875,7 @@ async function buildCnMatchDetailView(refId: string): Promise<{
 
 const bot = new Bot(BOT_TOKEN);
 
-type PendingAction = "cn" | "match" | "debug";
+type PendingAction = "cn" | "match";
 
 const pendingActions = new Map<
   number,
@@ -868,7 +885,6 @@ const pendingActions = new Map<
 const PROMPT_TAGS: Record<PendingAction, string> = {
   cn: "国服战绩总览查询",
   match: "国服近期对局查询",
-  debug: "国服接口原始数据探测",
 };
 
 function setPendingAction(
@@ -915,32 +931,6 @@ async function executeMatchQuery(ctx: Context, rawInput: string): Promise<void> 
   }
 }
 
-async function executeDebugQuery(ctx: Context, rawInput: string): Promise<void> {
-  const bnet = rawInput.trim().split(/\s+/)[0];
-  if (!bnet) return;
-  await ctx.replyWithChatAction("typing");
-  try {
-    const searchRes = await searchBnetAccount(bnet);
-    const player = extractPlayerFromSearch(bnet, searchRes);
-    const cardRes = await queryCard(player.customerToken);
-    const preview = JSON.stringify(
-      {
-        search_keys: Object.keys(player.raw || {}),
-        card_data: unwrapData(cardRes),
-      },
-      null,
-      2
-    ).slice(0, 3200);
-
-    await ctx.reply(
-      `🛠 <b>国服接口连通正常！原始结构预览：</b>\n<pre>${escapeHtml(preview)}</pre>`,
-      { parse_mode: "HTML" }
-    );
-  } catch (err) {
-    await handleCommandError(ctx, err);
-  }
-}
-
 bot.command(["start", "help"], async (ctx) => {
   const helpText = [
     `🇨🇳 <b>欢迎使用《守望先锋 2》国服战绩查询机器人！</b>`,
@@ -950,7 +940,6 @@ bot.command(["start", "help"], async (ctx) => {
     `  <i>示例：</i><code>/cn 你的昵称#51234</code>（私聊可直接发战网 ID）`,
     `• <code>/match 战网ID</code> — 查询国服近期战绩流水与单场对局详情`,
     `  <i>示例：</i><code>/match 你的昵称#51234</code>`,
-    `• <code>/debug 战网ID</code> — 检测网易大神接口连通性与原始字段`,
     ``,
     `💡 <b>提示：</b>数据来自网易大神，需输入完整的国服战网 ID（含 <code>#数字</code>）。`,
   ].join("\n");
@@ -998,23 +987,6 @@ bot.command("match", async (ctx) => {
   await executeMatchQuery(ctx, rawArg);
 });
 
-bot.command("debug", async (ctx) => {
-  const rawArg = ctx.match.trim();
-  if (!rawArg) {
-    setPendingAction(ctx.from?.id, "debug");
-    await ctx.reply(`🛠 <b>${PROMPT_TAGS.debug}</b>\n请发送要测试的国服战网 ID：`, {
-      parse_mode: "HTML",
-      reply_markup: {
-        force_reply: true,
-        input_field_placeholder: "输入国服战网 ID",
-        selective: true,
-      },
-    });
-    return;
-  }
-  await executeDebugQuery(ctx, rawArg);
-});
-
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
   if (!text || text.startsWith("/")) return;
@@ -1025,7 +997,6 @@ bot.on("message:text", async (ctx) => {
   if (replyMsg?.from?.is_bot && replyMsg.text) {
     if (replyMsg.text.includes(PROMPT_TAGS.cn)) action = "cn";
     else if (replyMsg.text.includes(PROMPT_TAGS.match)) action = "match";
-    else if (replyMsg.text.includes(PROMPT_TAGS.debug)) action = "debug";
   }
 
   if (!action && ctx.chat.type === "private") {
@@ -1041,7 +1012,6 @@ bot.on("message:text", async (ctx) => {
 
   if (action === "cn") await executeCnQuery(ctx, text);
   else if (action === "match") await executeMatchQuery(ctx, text);
-  else if (action === "debug") await executeDebugQuery(ctx, text);
 });
 
 bot.on("callback_query:data", async (ctx) => {
