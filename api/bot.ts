@@ -237,6 +237,41 @@ function translateModeCode(modeVal: any): string {
   return map[s.toLowerCase()] || s;
 }
 
+/** 常见网易大神地图 GUID 尾号/全号兜底映射（未命中时展示地图 ID 尾号） */
+const DASHEN_MAP_NAMES: Record<string, string> = {
+  "576460752303424195": "好莱坞",
+};
+
+/** 常见网易大神英雄 GUID 尾号/全号兜底映射（未命中时展示英雄 ID 尾号） */
+const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
+  "207165582859043685": "雾子",
+  "207165582859043119": "卡西迪",
+  "207165582859043274": "莱因哈特",
+  "207165582859044118": "源氏",
+};
+
+function resolveDashenMapGuid(rawGuid: any): string {
+  if (rawGuid === undefined || rawGuid === null) return "";
+  const str = String(rawGuid).trim();
+  if (!str) return "";
+  if (DASHEN_MAP_NAMES[str]) return DASHEN_MAP_NAMES[str];
+  for (const [fullId, name] of Object.entries(DASHEN_MAP_NAMES)) {
+    if (fullId.endsWith(str)) return name;
+  }
+  return `地图编号(${str.slice(-6)})`;
+}
+
+function resolveDashenHeroGuid(rawGuid: any): string {
+  if (rawGuid === undefined || rawGuid === null) return "";
+  const str = String(rawGuid).trim();
+  if (!str) return "";
+  if (DASHEN_HERO_GUID_NAMES[str]) return DASHEN_HERO_GUID_NAMES[str];
+  for (const [fullId, name] of Object.entries(DASHEN_HERO_GUID_NAMES)) {
+    if (fullId.endsWith(str)) return name;
+  }
+  return `英雄编号(${str.slice(-5)})`;
+}
+
 if (!BOT_TOKEN) {
   throw new Error("缺少环境变量 BOT_TOKEN，请在 Vercel 项目设置中配置。");
 }
@@ -577,26 +612,7 @@ function formatNum(val: any, decimals = 0): string {
 function formatRate(val: any): string {
   if (val === undefined || val === null || val === "") return "-";
   const str = String(val);
-  if (str.includes("%")) return str;
-  const n = Number(val);
-  if (Number.isNaN(n)) return str;
-  const pct = n <= 1 && n > 0 ? n * 100 : n;
-  return `${pct.toFixed(1)}%`;
-}
-
-function formatTimestamp(ts: any): string {
-  if (!ts) return "";
-  if (typeof ts === "string" && /[-/:]/.test(ts)) return ts;
-  const n = Number(ts);
-  if (!Number.isFinite(n) || n <= 0) return "";
-  const ms = n < 1e12 ? n * 1000 : n;
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "";
-  const pad = (x: number) => String(x).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** 解析单条对局的胜负状态（对齐 queryMatchList.md 的 matchRet 字段） */
+/** 解析单条对局的胜负状态（对齐 queryMatchList.md 的 matchRet 字段，并兼容比分与逆向编码） */
 function parseMatchResultBadge(m: any): string {
   const rawResult = pickDeepField(m, [
     "matchRet",
@@ -615,9 +631,12 @@ function parseMatchResultBadge(m: any): string {
     "status",
   ]);
 
-  if (rawResult === undefined || rawResult === null || rawResult === "") {
-    return "⚪平";
-  }
+  const teamScoreNum = Number(pickDeepField(m, ["teamScore", "myScore"]));
+  const oppScoreNum = Number(pickDeepField(m, ["opponentScore", "enemyScore"]));
+  const hasValidScores =
+    Number.isFinite(teamScoreNum) &&
+    Number.isFinite(oppScoreNum) &&
+    teamScoreNum !== oppScoreNum;
 
   if (typeof rawResult === "boolean") {
     return rawResult ? "🟢胜" : "🔴负";
@@ -625,23 +644,37 @@ function parseMatchResultBadge(m: any): string {
 
   if (typeof rawResult === "number") {
     if (rawResult === 1) return "🟢胜";
-    if (rawResult === -1 || rawResult === 2 || rawResult === 0) return "🔴负";
+    if (rawResult === -1) return "🔴负";
+    if (rawResult === 0) {
+      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
+      return "⚪平";
+    }
+    if (rawResult === 2) {
+      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
+      return "🔴负";
+    }
     if (rawResult === 3) return "⚪平";
   }
 
-  const s = String(rawResult).trim().toLowerCase();
-  if (["1", "true", "win", "won", "victory", "胜", "胜利"].includes(s)) {
-    return "🟢胜";
+  if (rawResult !== undefined && rawResult !== null && rawResult !== "") {
+    const s = String(rawResult).trim().toLowerCase();
+    if (["1", "true", "win", "won", "victory", "胜", "胜利"].includes(s)) {
+      return "🟢胜";
+    }
+    if (["-1", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(s)) {
+      return "🔴负";
+    }
+    if (["0", "2"].includes(s)) {
+      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
+      return s === "0" ? "⚪平" : "🔴负";
+    }
+    if (["3", "draw", "tie", "平", "平局"].includes(s)) {
+      return "⚪平";
+    }
   }
-  if (
-    ["-1", "2", "0", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(
-      s
-    )
-  ) {
-    return "🔴负";
-  }
-  if (["3", "draw", "tie", "平", "平局"].includes(s)) {
-    return "⚪平";
+
+  if (hasValidScores) {
+    return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
   }
 
   return "⚪平";
@@ -676,7 +709,7 @@ function parseMatchMapName(m: any): string {
 
   const mapGuid = pickDeepField(m, ["mapGuid", "map_guid", "mapId"]);
   if (mapGuid !== undefined) {
-    return `地图#${String(mapGuid).slice(-6)}`;
+    return resolveDashenMapGuid(mapGuid);
   }
 
   const modeVal = pickDeepField(m, [
@@ -707,7 +740,9 @@ function parseMatchHeroLabel(m: any): string {
 
   const heroGuid = pickDeepField(m, ["heroGuid", "hero_guid", "heroId"]);
   if (heroGuid !== undefined) {
-    return resolveDashenHeroName(heroGuid);
+    const aliasMapped = resolveDashenHeroName(heroGuid);
+    if (!aliasMapped.startsWith("英雄#")) return aliasMapped;
+    return resolveDashenHeroGuid(heroGuid);
   }
 
   return "";
