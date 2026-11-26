@@ -1424,7 +1424,7 @@ function cacheMatchRef(
 }
 
 // ============================================================================
-// 4.5 DeepSeek 电竞锐评生成逻辑（单场对局锐评 + 个人赛季画像锐评）
+// 4.5 DeepSeek 电竞锐评生成逻辑（单场对局锐评 + 个人赛季画像 + 隐性段位评估）
 // ============================================================================
 
 function getPlayerRoleHint(heroName: string): string {
@@ -1832,7 +1832,6 @@ async function generateDeepSeekPlayerReview(
     );
   }
 
-  // 四位置竞技段位与胜率
   const rankList =
     countData?.guideCountData ||
     cardData?.guideCountData ||
@@ -1860,7 +1859,6 @@ async function generateDeepSeekPlayerReview(
     profileLines.push(`各位置竞技段位与表现：${roleSummary}`);
   }
 
-  // 赛季模式汇总数据
   const statsObj =
     (countData &&
       (countData.presetsSummaryData ||
@@ -1888,7 +1886,6 @@ async function generateDeepSeekPlayerReview(
     );
   }
 
-  // 常用英雄池 Top 8
   const heroList =
     countData?.presetsHeroUseSummaryList ||
     countData?.heroList ||
@@ -2071,7 +2068,6 @@ async function generateDeepSeekHiddenMmrReview(
         `${rName}：明面 ${rankStr}（场次 ${matches || "-"}，胜率 ${Number.isFinite(winRate) ? `${winRate.toFixed(1)}%` : "-"}，KDA ${Number.isFinite(kda) ? kda.toFixed(2) : "-"}）`
       );
 
-      // 算法侧初算隐藏分偏移（供模型参考校准）
       if (tierCn && tierBaseRank[tierCn] && matches >= 5 && Number.isFinite(winRate)) {
         const baseIdx = tierBaseRank[tierCn];
         const currentSub = sub >= 1 && sub <= 5 ? sub : 3;
@@ -2130,7 +2126,7 @@ async function generateDeepSeekHiddenMmrReview(
     );
   }
 
-  // 3. 主力英雄池表现（判断是否是绝活上分或英雄池拖后腿）
+  // 3. 主力英雄池表现
   const heroList =
     countData?.presetsHeroUseSummaryList ||
     countData?.heroList ||
@@ -2153,7 +2149,65 @@ async function generateDeepSeekHiddenMmrReview(
           "mmr-hero"
         );
         const hGames = pickField(h, ["matchSum", "totalCount", "matchCount"]);
-      '严格基于提供的数据推理，禁止编造不存在的数据。',
+        const hWin = pickField(h, ["winRate", "winRatio"]);
+        const hKda = pickField(h, ["kda", "avgKda"]);
+        return `${hCn}(${hGames ?? "-"}场, 胜率${hWin ?? "-"}%, KDA ${hKda ?? "-"})`;
+      })
+      .join("；");
+    mmrLines.push(`主力英雄池表现：${heroSummary}`);
+  }
+
+  // 4. 最近 8 场战绩连胜/连败走势
+  const recentMatches: any[] = Array.isArray(listBody)
+    ? listBody
+    : Array.isArray(listBody?.matchList)
+      ? listBody.matchList
+      : listBody?.list || listBody?.records || listBody?.items || [];
+
+  if (recentMatches.length > 0) {
+    const recentSlice = recentMatches.slice(0, 8);
+    let winStreak = 0;
+    let lossStreak = 0;
+    const seqTags: string[] = [];
+
+    for (const m of recentSlice) {
+      const badge = parseMatchResultBadge(m);
+      const isWin = badge.includes("胜");
+      const isLoss = badge.includes("负");
+      seqTags.push(isWin ? "胜" : isLoss ? "负" : "平");
+    }
+
+    for (const tag of seqTags) {
+      if (tag === "胜" && lossStreak === 0) winStreak++;
+      else if (tag === "负" && winStreak === 0) lossStreak++;
+      else break;
+    }
+
+    const recentWins = seqTags.filter((t) => t === "胜").length;
+    const recentLosses = seqTags.filter((t) => t === "负").length;
+    const streakNote =
+      winStreak >= 2
+        ? `当前 ${winStreak} 连胜`
+        : lossStreak >= 2
+          ? `当前 ${lossStreak} 连败`
+          : "胜负交替";
+
+    mmrLines.push(
+      `近期战绩走势（最近${recentSlice.length}场）：${recentWins}胜${recentLosses}负（序列：${seqTags.join("-")}，${streakNote}）`
+    );
+  }
+
+  const promptContext = sanitizeSafeText(
+    mmrLines.join("\n"),
+    "mmrPromptContext"
+  );
+
+  const systemPrompt = sanitizeSafeText(
+    [
+      "你是一位精通《守望先锋 2》匹配机制（MMR/隐藏分）与排位算法的数据分析师。",
+      "请综合玩家的【各位置明面段位、胜率背离度、场均KDA/伤害/治疗/死亡效率、主力英雄池胜率、近期连胜/连败动量】，反推其当前真实的“隐性隐藏分（MMR）段位”与系统匹配状态。",
+      "请为每一个在数据中出现的职责（如 坦克 / 输出 / 支援 / 开放）单独生成一条段位对照。",
+      "严格基于提供的数据推理，禁止编造不存在的数据。",
       "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
       "{",
       '  "role_comparisons": [',
@@ -2213,7 +2267,6 @@ async function generateDeepSeekHiddenMmrReview(
     );
   }
 
-  // 若模型未按数组返回，兜底使用旧字段展示
   if (comparisonLines.length === 0) {
     const surfaceRank = escapeHtml(
       sanitizeSafeText(
