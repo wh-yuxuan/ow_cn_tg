@@ -611,7 +611,31 @@ function formatNum(val: any, decimals = 0): string {
 
 function formatRate(val: any): string {
   if (val === undefined || val === null || val === "") return "-";
-  const str = String(val);
+  const str = String(val).trim();
+  if (str.endsWith("%")) return escapeHtml(str);
+  const num = Number(str);
+  if (Number.isNaN(num)) return escapeHtml(str);
+  return `${num.toFixed(1)}%`;
+}
+
+function formatTimestamp(ts: any): string {
+  if (ts === undefined || ts === null || ts === "") return "";
+  let ms = Number(ts);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    const parsed = Date.parse(String(ts));
+    if (!Number.isFinite(parsed) || parsed <= 0) return "";
+    ms = parsed;
+  } else if (ms < 1e12) {
+    ms *= 1000;
+  }
+  const d = new Date(ms);
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hour = String(d.getHours()).padStart(2, "0");
+  const minute = String(d.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
 /** 解析单条对局的胜负状态（对齐 queryMatchList.md 的 matchRet 字段，并兼容比分与逆向编码） */
 function parseMatchResultBadge(m: any): string {
   const rawResult = pickDeepField(m, [
