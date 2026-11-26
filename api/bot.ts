@@ -1,9 +1,8 @@
 /**
- * 增加的deepseek锐评
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（独立部署版）
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
- * 数据来源：网易大神上游接口 (datamsapi.ds.163.com)
+ * 数据来源：网易大神上游接口 (datamsapi.ds.163.com) + DeepSeek AI 锐评
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -1508,14 +1507,14 @@ async function generateDeepSeekMatchReview(
     "请严格依据提供的单场对局数据生成分析报告，禁止虚构不存在的数据或技能细节。",
     "不要把坦克或输出的低助攻/零助攻机械地判为负面表现，除非英雄机制高度依赖增益/挂状态且整体协同极差。",
     "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
-    '{',
+    "{",
     '  "score": "S/A/B/C/D",',
     '  "general_summary": "一句话评价焦点玩家本场表现",',
     '  "key_point": "决定胜负的唯一核心点",',
     '  "mvp_or_scapegoat": "本场真正MVP或最明显背锅位及数据依据",',
     '  "role_diff": "坦克/输出/辅助三路对位对比简析",',
     '  "comment": "犀利简评与人格化小结（100字以内）"',
-    '}',
+    "}",
   ].join("\n");
 
   const chatUrl = AI_BASE_URL.endsWith("/chat/completions")
@@ -1570,7 +1569,9 @@ async function generateDeepSeekMatchReview(
   const parsed = parseAiAnalysisJson(String(content));
   const scoreBadge = escapeHtml(String(parsed?.score || "B").trim());
   const generalSummary = escapeHtml(
-    String(parsed?.general_summary || cleanAiJsonText(String(content)) || "暂无总结").trim()
+    String(
+      parsed?.general_summary || cleanAiJsonText(String(content)) || "暂无总结"
+    ).trim()
   );
   const keyPoint = escapeHtml(String(parsed?.key_point || "-").trim());
   const mvpOrScapegoat = escapeHtml(
@@ -1681,11 +1682,21 @@ async function buildCnOverviewView(
 
     if (Array.isArray(rankList) && rankList.length > 0) {
       const normalizedRoleKey = (rawVal: any): string => {
-        const s = String(rawVal || "").trim().toLowerCase();
-        if (s === "tank" || s.includes("坦克") || s.includes("重装")) return "tank";
+        const s = String(rawVal || "")
+          .trim()
+          .toLowerCase();
+        if (s === "tank" || s.includes("坦克") || s.includes("重装"))
+          return "tank";
         if (s === "dps" || s === "damage" || s.includes("输出")) return "dps";
-        if (s === "healer" || s === "support" || s.includes("支援") || s.includes("治疗")) return "healer";
-        if (s === "open" || s === "free" || s.includes("开放") || s.includes("自由")) return "open";
+        if (
+          s === "healer" ||
+          s === "support" ||
+          s.includes("支援") ||
+          s.includes("治疗")
+        )
+          return "healer";
+        if (s === "open" || s === "free" || s.includes("开放") || s.includes("自由"))
+          return "open";
         return s || "other";
       };
 
@@ -1708,7 +1719,11 @@ async function buildCnOverviewView(
         }
       }
 
-      const formatRoleLine = (rKey: string, r: any, fallbackLabel: string): string => {
+      const formatRoleLine = (
+        rKey: string,
+        r: any,
+        fallbackLabel: string
+      ): string => {
         const roleLabel = roleMapCn[rKey] || fallbackLabel || rKey;
         if (!r) {
           return `• ${escapeHtml(roleLabel)}：<b>未定级</b>（暂无场次）`;
@@ -1757,11 +1772,19 @@ async function buildCnOverviewView(
       };
 
       for (const rKey of roleOrder) {
-        rankLines.push(formatRoleLine(rKey, entriesByRole.get(rKey), roleMapCn[rKey]));
+        rankLines.push(
+          formatRoleLine(rKey, entriesByRole.get(rKey), roleMapCn[rKey])
+        );
       }
       for (const ex of extraEntries) {
         const rawLabel = String(
-          pickField(ex.item, ["roleType", "roleName", "role", "name", "typeName"]) || "其他"
+          pickField(ex.item, [
+            "roleType",
+            "roleName",
+            "role",
+            "name",
+            "typeName",
+          ]) || "其他"
         );
         rankLines.push(formatRoleLine(ex.key, ex.item, rawLabel));
       }
@@ -1780,10 +1803,18 @@ async function buildCnOverviewView(
       ]);
       const open = pickField(cardData, ["openRank", "freeRank", "openTier"]);
       if (tank || dps || sup || open) {
-        rankLines.push(`• 🛡 坦克：<b>${escapeHtml(translateRankName(tank) || "未定级")}</b>`);
-        rankLines.push(`• ⚔️ 输出：<b>${escapeHtml(translateRankName(dps) || "未定级")}</b>`);
-        rankLines.push(`• 💉 支援：<b>${escapeHtml(translateRankName(sup) || "未定级")}</b>`);
-        rankLines.push(`• 🎲 开放：<b>${escapeHtml(translateRankName(open) || "未定级")}</b>`);
+        rankLines.push(
+          `• 🛡 坦克：<b>${escapeHtml(translateRankName(tank) || "未定级")}</b>`
+        );
+        rankLines.push(
+          `• ⚔️ 输出：<b>${escapeHtml(translateRankName(dps) || "未定级")}</b>`
+        );
+        rankLines.push(
+          `• 💉 支援：<b>${escapeHtml(translateRankName(sup) || "未定级")}</b>`
+        );
+        rankLines.push(
+          `• 🎲 开放：<b>${escapeHtml(translateRankName(open) || "未定级")}</b>`
+        );
       }
     }
   }
