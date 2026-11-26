@@ -1985,6 +1985,277 @@ async function generateDeepSeekPlayerReview(
   ].join("\n");
 }
 
+/** 3. 隐性段位 / 真实隐藏分（MMR）推演评估（点击「🔮 隐性段位评估」触发） */
+async function generateDeepSeekHiddenMmrReview(
+  bnet: string,
+  gameMode: CnGameMode
+): Promise<string> {
+  const searchRes = await searchBnetAccount(bnet);
+  const player = extractPlayerFromSearch(bnet, searchRes);
+
+  const [cardRes, countRes, matchListRes] = await Promise.allSettled([
+    queryCard(player.customerToken),
+    queryCountInfo(player.customerToken, gameMode),
+    queryMatchList(player.customerToken, gameMode, 1),
+  ]);
+
+  const cardData =
+    cardRes.status === "fulfilled" ? unwrapData(cardRes.value) : null;
+  const countData =
+    countRes.status === "fulfilled" ? unwrapData(countRes.value) : null;
+  const listBody =
+    matchListRes.status === "fulfilled" ? unwrapData(matchListRes.value) : null;
+
+  const safeBnetForAi = sanitizeSafeText(player.bnet, "mmr-bnet");
+  const modeLabel = gameMode === "sport" ? "竞技比赛" : "快速比赛";
+
+  const mmrLines: string[] = [
+    `玩家战网 ID：${safeBnetForAi}`,
+    `评估模式：${modeLabel}`,
+  ];
+
+  // 1. 提取各位置明面段位、胜率、场次、KDA 与量化推演偏移值
+  const tierBaseRank: Record<string, number> = {
+    青铜: 1,
+    白银: 2,
+    黄金: 3,
+    白金: 4,
+    翡翠: 5,
+    钻石: 6,
+    大师: 7,
+    宗师: 8,
+    英杰: 9,
+  };
+  const tierNamesByIndex = [
+    "",
+    "青铜",
+    "白银",
+    "黄金",
+    "白金",
+    "翡翠",
+    "钻石",
+    "大师",
+    "宗师",
+    "英杰",
+  ];
+
+  const rankList =
+    countData?.guideCountData ||
+    cardData?.guideCountData ||
+    cardData?.rankList ||
+    cardData?.ranks ||
+    cardData?.roleRankList;
+
+  const roleDetails: string[] = [];
+  const heuristicHints: string[] = [];
+
+  if (Array.isArray(rankList) && rankList.length > 0) {
+    for (const r of rankList) {
+      const rName = sanitizeSafeText(
+        pickField(r, ["roleType", "roleName", "role", "name"]) || "位置",
+        "mmr-role"
+      );
+      const lastRank = r?.lastRankInfo || r?.rankInfo || r;
+      const tierCn = translateRankName(
+        pickField(lastRank, ["rankName", "tierName", "rank"])
+      );
+      const sub = Number(pickField(lastRank, ["rankSubTier"]) || 0);
+      const matches = Number(pickField(r, ["matchSum", "matches"]) || 0);
+      const winRate = Number(pickField(r, ["winRate", "win_rate"]) || NaN);
+      const kda = Number(pickField(r, ["kda"]) || NaN);
+
+      const rankStr = tierCn
+        ? `${tierCn}${sub > 0 ? ` ${sub}` : ""}`
+        : "未定级";
+      roleDetails.push(
+        `${rName}：明面 ${rankStr}（场次 ${matches || "-"}，胜率 ${Number.isFinite(winRate) ? `${winRate.toFixed(1)}%` : "-"}，KDA ${Number.isFinite(kda) ? kda.toFixed(2) : "-"}）`
+      );
+
+      // 算法侧初算隐藏分偏移（供模型参考校准）
+      if (tierCn && tierBaseRank[tierCn] && matches >= 5 && Number.isFinite(winRate)) {
+        const baseIdx = tierBaseRank[tierCn];
+        const currentSub = sub >= 1 && sub <= 5 ? sub : 3;
+        const winDelta = winRate - 50;
+        const kdaBonus = Number.isFinite(kda) ? (kda - 2.3) * 0.6 : 0;
+        const sampleWeight = Math.min(1.2, Math.max(0.5, matches / 25));
+        const divisionShift = Math.round(
+          (winDelta * 0.16 + kdaBonus) * sampleWeight
+        );
+        const totalDivs = baseIdx * 5 + (5 - currentSub) + divisionShift;
+        const estTierIdx = Math.min(
+          9,
+          Math.max(1, Math.floor(totalDivs / 5))
+        );
+        const estSub = Math.min(5, Math.max(1, 5 - (totalDivs % 5)));
+        const estName = `${tierNamesByIndex[estTierIdx]} ${estSub}`;
+        heuristicHints.push(
+          `${rName}量化初算参考：明面 ${rankStr} -> 隐性约 ${estName}（胜率偏差 ${winDelta >= 0 ? "+" : ""}${winDelta.toFixed(1)}%）`
+        );
+      }
+    }
+  }
+
+  if (roleDetails.length > 0) {
+    mmrLines.push(`各位置明面段位与样本：${roleDetails.join("；")}`);
+  }
+  if (heuristicHints.length > 0) {
+    mmrLines.push(`算法侧胜率/KDA 偏移初算：${heuristicHints.join("；")}`);
+  }
+
+  // 2. 赛季总体实战效率
+  const statsObj =
+    (countData &&
+      (countData.presetsSummaryData ||
+        countData.total ||
+        countData.summary ||
+        countData.overview ||
+        countData)) ||
+    null;
+
+  if (statsObj && typeof statsObj === "object") {
+    const mSum = pickField(statsObj, ["matchSum", "totalCount", "matchCount"]);
+    const wSum = pickField(statsObj, ["matchWinSum", "winCount", "wins"]);
+    const lSum = pickField(statsObj, ["matchLossSum", "lossCount", "losses"]);
+    const wRate = pickField(statsObj, ["winRate", "winRatio", "win_rate"]);
+    const kda = pickField(statsObj, ["kda", "avgKda"]);
+    const avgK = pickField(statsObj, ["aveKill", "avgEliminations"]);
+    const avgA = pickField(statsObj, ["aveAssist", "avgAssists"]);
+    const avgD = pickField(statsObj, ["aveDeath", "avgDeaths"]);
+    const avgDmg = pickField(statsObj, ["aveHeroDamage", "avgDamage"]);
+    const avgHeal = pickField(statsObj, ["aveCure", "avgHeal"]);
+    const avgRes = pickField(statsObj, ["aveResistDamage"]);
+
+    mmrLines.push(
+      `赛季${modeLabel}实战效率：总场次 ${mSum ?? "-"}（${wSum ?? "-"}胜 ${lSum ?? "-"}负，胜率 ${wRate ?? "-"}%），综合 KDA ${kda ?? "-"}，场均消灭 ${avgK ?? "-"} / 助攻 ${avgA ?? "-"} / 阵亡 ${avgD ?? "-"}，场均伤害 ${avgDmg ?? "-"}，场均治疗 ${avgHeal ?? "-"}，场均抵伤 ${avgRes ?? "-"}`
+    );
+  }
+
+  // 3. 主力英雄池表现（判断是否是绝活上分或英雄池拖后腿）
+  const heroList =
+    countData?.presetsHeroUseSummaryList ||
+    countData?.heroList ||
+    countData?.heroes ||
+    countData?.topHeroes ||
+    cardData?.heroList;
+  if (Array.isArray(heroList) && heroList.length > 0) {
+    const heroSummary = heroList
+      .slice(0, 6)
+      .map((h: any) => {
+        const hRaw = pickField(h, [
+          "heroName",
+          "name",
+          "cnName",
+          "heroGuid",
+          "heroId",
+        ]);
+        const hCn = sanitizeSafeText(
+          resolveDashenHeroName(hRaw) || "未知英雄",
+          "mmr-hero"
+        );
+        const hGames = pickField(h, ["matchSum", "totalCount", "matchCount"]);
+        const hWin = pickField(h, ["winRate", "winRatio"]);
+        const hKda = pickField(h, ["kda", "avgKda"]);
+        return `${hCn}(${hGames ?? "-"}场, 胜率${hWin ?? "-"}%, KDA ${hKda ?? "-"})`;
+      })
+      .join("；");
+    mmrLines.push(`主力英雄池数据：${heroSummary}`);
+  }
+
+  // 4. 近期 8 场战绩流水趋势（判断当下隐藏分波动方向：连胜抬分期 vs 连败制裁期）
+  const recentMatches: any[] = Array.isArray(listBody)
+    ? listBody
+    : Array.isArray(listBody?.matchList)
+      ? listBody.matchList
+      : listBody?.list || listBody?.records || listBody?.items || [];
+
+  if (recentMatches.length > 0) {
+    let recentWins = 0;
+    let recentLosses = 0;
+    const seq: string[] = [];
+    for (const m of recentMatches.slice(0, 8)) {
+      const badge = parseMatchResultBadge(m);
+      if (badge.includes("胜")) {
+        recentWins++;
+        seq.push("胜");
+      } else if (badge.includes("负")) {
+        recentLosses++;
+        seq.push("负");
+      } else {
+        seq.push("平");
+      }
+    }
+    mmrLines.push(
+      `近期 ${Math.min(recentMatches.length, 8)} 场战绩走势（由近及远）：[${seq.join("-")}]（${recentWins}胜 ${recentLosses}负）`
+    );
+  }
+
+  const promptContext = sanitizeSafeText(
+    mmrLines.join("\n"),
+    "mmrPromptContext"
+  );
+
+  const systemPrompt = sanitizeSafeText(
+    [
+      "你是一位精通《守望先锋 2》隐藏分（MMR）匹配机制与排位算法的资深电竞数据分析师。",
+      "请结合玩家的明面段位、各位置胜率与场次、综合 KDA 与场均效率、主力英雄表现、近期战绩走势以及量化初算参考，反推出该玩家当前的【真实隐性实力段位】与【系统匹配状态】。",
+      "推理原则：",
+      "1. 若某位置胜率显著高于52%~55%且KDA优秀，说明隐性MMR高于明面段位（处于系统抬分期/连胜加分通道）；",
+      "2. 若胜率低于47%且阵亡偏高，说明隐性MMR低于明面段位（段位虚高/守门员或系统平衡负重期）；",
+      "3. 若尚未定级或查看的是快速模式，则根据其场均战斗效率、KDA 与英雄池胜率推断其等效竞技实力分段。",
+      "严格基于提供的数据推理，禁止编造不存在的数据。",
+      "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
+      "{",
+      '  "surface_rank": "当前主要明面段位概括（如：白金 2 / 钻石 4，若无定级写未定级）",',
+      '  "estimated_real_rank": "AI 推演的真实隐性实力段位区间（如：钻石 4 ~ 钻石 3）",',
+      '  "mmr_status": "MMR状态标签（如：隐藏分溢价 · 系统抬分期 / 段位虚高 · 守门员承压期 / 实力与分段高度匹配 / 炸鱼级降维打击）",',
+      '  "evidence": "核心数据推导依据（结合段位胜率背离度、KDA效率、主力英雄或近期走势说明，90字以内）",',
+      '  "trend_advice": "冲分建议与下一步预测（70字以内）"',
+      "}",
+    ].join("\n"),
+    "mmrSystemPrompt"
+  );
+
+  const { parsed, rawContent } = await callDeepSeekJson(
+    systemPrompt,
+    promptContext,
+    `mmr:${gameMode}:${safeBnetForAi}`
+  );
+
+  const surfaceRank = escapeHtml(
+    sanitizeSafeText(parsed?.surface_rank || "未定级 / 综合评估", "mmr-surface").trim()
+  );
+  const estRealRank = escapeHtml(
+    sanitizeSafeText(
+      parsed?.estimated_real_rank || "推演中",
+      "mmr-est"
+    ).trim()
+  );
+  const mmrStatus = escapeHtml(
+    sanitizeSafeText(
+      parsed?.mmr_status || "实力与当前分段基本匹配",
+      "mmr-status"
+    ).trim()
+  );
+  const evidence = escapeHtml(
+    sanitizeSafeText(
+      parsed?.evidence || cleanAiJsonText(rawContent) || "暂无推导依据",
+      "mmr-evidence"
+    ).trim()
+  );
+  const trendAdvice = escapeHtml(
+    sanitizeSafeText(parsed?.trend_advice || "-", "mmr-advice").trim()
+  );
+
+  return [
+    `🔮 <b>DeepSeek 隐性段位评估 — ${escapeHtml(safeBnetForAi)}</b>`,
+    `📌 明面段位：<b>${surfaceRank}</b>  ➔  真实推演：<b>${estRealRank}</b>`,
+    `⚖️ 匹配状态：<b>「${mmrStatus}」</b>（${modeLabel}）`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `📊 <b>数据推导依据：</b>${evidence}`,
+    `🧭 <b>冲分趋势预测：</b><i>${trendAdvice}</i>`,
+  ].join("\n");
+}
+
 // ============================================================================
 // 5. 视图渲染：国服总览卡片 / 近期战绩列表 / 单场对局详情
 // ============================================================================
@@ -2387,12 +2658,19 @@ async function buildCnOverviewView(
   const nextM = gameMode === "sport" ? "l" : "s";
 
   const selfRoastCb = `r:${mCode}:${player.bnet}`;
+  const hiddenMmrCb = `h:${mCode}:${player.bnet}`;
   const switchModeCb = `o:${nextM}:${player.bnet}`;
   const matchListCb = `m:${mCode}:1:${player.bnet}`;
   const refreshCb = `o:${mCode}:${player.bnet}`;
 
   if (isSafeCallbackData(selfRoastCb)) {
-    keyboard.text("🤖 锐评自己", selfRoastCb).row();
+    keyboard.text("🤖 锐评自己", selfRoastCb);
+  }
+  if (isSafeCallbackData(hiddenMmrCb)) {
+    keyboard.text("🔮 隐性段位评估", hiddenMmrCb);
+  }
+  if (isSafeCallbackData(selfRoastCb) || isSafeCallbackData(hiddenMmrCb)) {
+    keyboard.row();
   }
   if (isSafeCallbackData(switchModeCb)) {
     keyboard.text(
@@ -2885,6 +3163,37 @@ bot.on("callback_query:data", async (ctx) => {
           aiErr instanceof DashenError
             ? aiErr.message
             : "❌ DeepSeek 个人锐评生成失败，请稍后重试。";
+        await ctx.api.editMessageText(
+          loadingMsg.chat.id,
+          loadingMsg.message_id,
+          errHtml,
+          { parse_mode: "HTML" }
+        );
+      }
+      return;
+    }
+
+    if (action === "h" && parts.length >= 3) {
+      const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
+      const bnet = parts.slice(2).join(":");
+      await safeAnswerCallback(ctx, "正在反推你的隐性隐藏分与真实段位...");
+      const loadingMsg = await ctx.reply(
+        `🔮 正在综合分析 <b>${escapeHtml(sanitizeSafeText(bnet, "mmr-loading-bnet"))}</b> 的明面段位、胜率背离度、实战效率与近期战绩走势，推演隐性段位中...`,
+        { parse_mode: "HTML" }
+      );
+      try {
+        const mmrText = await generateDeepSeekHiddenMmrReview(bnet, mode);
+        await ctx.api.editMessageText(
+          loadingMsg.chat.id,
+          loadingMsg.message_id,
+          mmrText,
+          { parse_mode: "HTML" }
+        );
+      } catch (aiErr) {
+        const errHtml =
+          aiErr instanceof DashenError
+            ? aiErr.message
+            : "❌ DeepSeek 隐性段位评估生成失败，请稍后重试。";
         await ctx.api.editMessageText(
           loadingMsg.chat.id,
           loadingMsg.message_id,
