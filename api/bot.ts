@@ -32,6 +32,25 @@ const SEARCH_BNET_ACCOUNT_URL = `${DASHEN_API_ROOT}/searchBnetAccount`;
 
 const API_TIMEOUT_MS = 12_000;
 
+if (!BOT_TOKEN) {
+  throw new Error("缺少环境变量 BOT_TOKEN，请在 Vercel 项目设置中配置。");
+}
+
+type CnGameMode = "sport" | "leisure";
+
+interface DashenResponse<T = any> {
+  code?: number;
+  msg?: string;
+  message?: string;
+  data?: T;
+  result?: T;
+  [key: string]: any;
+}
+
+// ============================================================================
+// 2. 英雄 / 地图 / 模式 映射与 GUID 兼容处理
+// ============================================================================
+
 /** 对齐 Overstats src/constants/chara.py 的英雄标准名与外号别名映射 */
 const DASHEN_HERO_ALIASES: Record<string, string[]> = {
   安娜: ["ana", "安娜", "鸡妈", "恐怖老太太", "娜娜", "激素老太", "禁疗摩西"],
@@ -209,6 +228,51 @@ const HERO_ALIAS_TO_CN: Record<string, string> = (() => {
   return map;
 })();
 
+/** 常见网易大神地图 GUID / 尾号映射（完整全量地图表可由 res/query_tool.json 补充） */
+const DASHEN_MAP_NAMES: Record<string, string> = {
+  "576460752303424195": "好莱坞",
+  "424695": "漓江塔",
+  "425122": "尼泊尔",
+  "426283": "国王大道",
+  "426693": "努巴尼",
+  "427250": "直布罗陀监测站",
+  "426356": "伊利奥斯",
+  "425848": "绿洲城",
+  "424195": "花冈",
+  "424175": "新皇后街",
+  "427628": "苏里南",
+  "425182": "萨摩亚",
+  "428538": "新垃圾镇",
+  "426131": "多拉多",
+  "426191": "66号公路",
+  "426305": "监测站：直布罗陀",
+  "426512": "艾兴瓦尔德",
+  "426615": "暴雪世界",
+  "426823": "渣客镇",
+  "426912": "里阿尔托",
+  "427045": "哈瓦那",
+  "427188": "帕拉伊苏",
+  "427319": "南极半岛",
+  "427420": "新欢喜城",
+  "427512": "萨摩亚海滩",
+  "427810": "符文堡垒",
+};
+
+/** 常见网易大神英雄 GUID / 尾号映射（对齐 queryMatchInfo.md 与常用英雄 ID） */
+const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
+  "207165582859043685": "雾子",
+  "207165582859043119": "卡西迪",
+  "207165582859043274": "莱因哈特",
+  "207165582859044118": "源氏",
+  "43131": "雾子",
+  "43118": "天使",
+  "44067": "朱诺",
+  "43234": "莫伊拉",
+  "44208": "安娜",
+  "44118": "卡西迪",
+  "43134": "巴蒂斯特",
+};
+
 function resolveDashenHeroName(raw: any): string {
   if (raw === undefined || raw === null) return "";
   const str = String(raw).trim();
@@ -217,8 +281,13 @@ function resolveDashenHeroName(raw: any): string {
   if (HERO_ALIAS_TO_CN[lower]) {
     return HERO_ALIAS_TO_CN[lower];
   }
-  if (/^\d{10,}$/.test(str)) {
-    return `英雄#${str.slice(-5)}`;
+  if (DASHEN_HERO_GUID_NAMES[str]) {
+    return DASHEN_HERO_GUID_NAMES[str];
+  }
+  for (const [fullId, name] of Object.entries(DASHEN_HERO_GUID_NAMES)) {
+    if (fullId.endsWith(str) || str.endsWith(fullId)) {
+      return name;
+    }
   }
   return str;
 }
@@ -237,58 +306,37 @@ function translateModeCode(modeVal: any): string {
   return map[s.toLowerCase()] || s;
 }
 
-/** 常见网易大神地图 GUID 尾号/全号兜底映射（未命中时展示地图 ID 尾号） */
-const DASHEN_MAP_NAMES: Record<string, string> = {
-  "576460752303424195": "好莱坞",
-};
-
-/** 常见网易大神英雄 GUID 尾号/全号兜底映射（未命中时展示英雄 ID 尾号） */
-const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
-  "207165582859043685": "雾子",
-  "207165582859043119": "卡西迪",
-  "207165582859043274": "莱因哈特",
-  "207165582859044118": "源氏",
-};
-
 function resolveDashenMapGuid(rawGuid: any): string {
   if (rawGuid === undefined || rawGuid === null) return "";
   const str = String(rawGuid).trim();
   if (!str) return "";
   if (DASHEN_MAP_NAMES[str]) return DASHEN_MAP_NAMES[str];
   for (const [fullId, name] of Object.entries(DASHEN_MAP_NAMES)) {
-    if (fullId.endsWith(str)) return name;
+    if (fullId.endsWith(str) || str.endsWith(fullId)) {
+      return name;
+    }
   }
-  return `地图编号(${str.slice(-6)})`;
+  return `地图ID:${str.slice(-6)}`;
 }
 
 function resolveDashenHeroGuid(rawGuid: any): string {
   if (rawGuid === undefined || rawGuid === null) return "";
   const str = String(rawGuid).trim();
   if (!str) return "";
+  if (HERO_ALIAS_TO_CN[str.toLowerCase()]) {
+    return HERO_ALIAS_TO_CN[str.toLowerCase()];
+  }
   if (DASHEN_HERO_GUID_NAMES[str]) return DASHEN_HERO_GUID_NAMES[str];
   for (const [fullId, name] of Object.entries(DASHEN_HERO_GUID_NAMES)) {
-    if (fullId.endsWith(str)) return name;
+    if (fullId.endsWith(str) || str.endsWith(fullId)) {
+      return name;
+    }
   }
-  return `英雄编号(${str.slice(-5)})`;
-}
-
-if (!BOT_TOKEN) {
-  throw new Error("缺少环境变量 BOT_TOKEN，请在 Vercel 项目设置中配置。");
-}
-
-type CnGameMode = "sport" | "leisure";
-
-interface DashenResponse<T = any> {
-  code?: number;
-  msg?: string;
-  message?: string;
-  data?: T;
-  result?: T;
-  [key: string]: any;
+  return `英雄ID:${str.slice(-5)}`;
 }
 
 // ============================================================================
-// 2. 网易大神 HTTP 客户端
+// 3. 网易大神 HTTP 客户端
 // ============================================================================
 
 class DashenError extends Error {
@@ -463,7 +511,7 @@ async function queryMatchInfo(
 }
 
 // ============================================================================
-// 3. 数据提取与格式化工具
+// 4. 数据提取与格式化工具
 // ============================================================================
 
 function escapeHtml(text: string): string {
@@ -764,8 +812,6 @@ function parseMatchHeroLabel(m: any): string {
 
   const heroGuid = pickDeepField(m, ["heroGuid", "hero_guid", "heroId"]);
   if (heroGuid !== undefined) {
-    const aliasMapped = resolveDashenHeroName(heroGuid);
-    if (!aliasMapped.startsWith("英雄#")) return aliasMapped;
     return resolveDashenHeroGuid(heroGuid);
   }
 
@@ -808,7 +854,7 @@ function cacheMatchRef(
 }
 
 // ============================================================================
-// 4. 视图渲染：国服总览卡片 / 近期战绩列表 / 单场对局详情
+// 5. 视图渲染：国服总览卡片 / 近期战绩列表 / 单场对局详情
 // ============================================================================
 
 async function buildCnOverviewView(
@@ -1353,7 +1399,7 @@ async function buildCnMatchDetailView(refId: string): Promise<{
 }
 
 // ============================================================================
-// 5. 初始化 grammY Bot 与指令注册（支持一步指令 + 两步 ForceReply）
+// 6. 初始化 grammY Bot 与指令注册（支持一步指令 + 两步 ForceReply）
 // ============================================================================
 
 const bot = new Bot(BOT_TOKEN);
@@ -1586,7 +1632,7 @@ bot.catch((err) => {
 });
 
 // ============================================================================
-// 6. Vercel Serverless Function 入口
+// 7. Vercel Serverless Function 入口
 // ============================================================================
 
 const handleWebhook = webhookCallback(bot, "http", {
