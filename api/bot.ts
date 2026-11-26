@@ -2,7 +2,7 @@
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（独立部署版）
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
- * 数据来源：网易大神上游接口 (datamsapi.ds.163.com/v1/a19ld5tool) + DeepSeek AI 锐评
+ * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool) + DeepSeek AI 锐评
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -26,9 +26,12 @@ const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+// 默认指向已配置反代的域名 https://ow.eyy8.top，同时支持环境变量覆盖
+const DASHEN_RELAY_ORIGIN =
+  process.env.DASHEN_RELAY_ORIGIN?.replace(/\/+$/, "") || "https://ow.eyy8.top";
 const DASHEN_API_ROOT =
   process.env.DASHEN_API_ROOT?.replace(/\/+$/, "") ||
-  "https://datamsapi.ds.163.com/v1/a19ld5tool";
+  `${DASHEN_RELAY_ORIGIN}/v1/a19ld5tool`;
 const DASHEN_CUSTOMER_API_BASE =
   process.env.DASHEN_CUSTOMER_API_BASE?.replace(/\/+$/, "") ||
   `${DASHEN_API_ROOT}/customer`;
@@ -71,7 +74,6 @@ interface DashenResponse<T = any> {
 // 2. 英雄 / 地图 / 段位 / 指标 映射表（源自 query_tool.json 与 chara.py）
 // ============================================================================
 
-/** 英雄别名 -> 标准中文名（对齐 Overstats src/constants/chara.py） */
 const DASHEN_HERO_ALIASES: Record<string, string[]> = {
   安娜: ["ana", "安娜", "鸡妈", "恐怖老太太", "娜娜", "激素老太", "禁疗摩西"],
   艾什: ["ashe", "ash", "艾什", "艾许", "王母娘娘", "老八"],
@@ -298,7 +300,6 @@ const HERO_ALIAS_TO_CN: Record<string, string> = (() => {
   return map;
 })();
 
-/** 英雄 GUID / Hex ID -> 中文名（对齐 query_tool.json heroList） */
 const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
   "207165582859042818": "死神",
   "0x02e0000000000002": "死神",
@@ -410,7 +411,6 @@ const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
   "0x02e0000000000570": "血律",
 };
 
-/** 地图 GUID / Hex ID -> 中文地图名（完整对齐 query_tool.json mapList） */
 const DASHEN_MAP_NAMES: Record<string, string> = {
   "576460752303423579": "阿努比斯神殿",
   "0x080000000000005b": "阿努比斯神殿",
@@ -679,7 +679,6 @@ const DASHEN_MAP_NAMES: Record<string, string> = {
   "576460752303428538": "国服新/未收录地图(576460752303428538)",
 };
 
-/** 常见通用统计指标 GUID -> 中文指标名（源自 query_tool.json heroAttrList） */
 const DASHEN_STAT_GUID_NAMES: Record<string, string> = {
   "603482350067646495": "消灭",
   "603482350067646497": "累计游戏时间",
@@ -699,7 +698,6 @@ const DASHEN_STAT_GUID_NAMES: Record<string, string> = {
   "603482350067648623": "英雄获胜",
 };
 
-/** 英文/拼音段位名 -> 中文段位名（对齐 query_tool.json rankList 与 chara.py RANK_DIST） */
 const DASHEN_RANK_NAME_CN: Record<string, string> = {
   bronze: "青铜",
   silver: "白银",
@@ -964,7 +962,6 @@ async function dashenRequest<T = any>(
   return payload;
 }
 
-/** 1. 搜索国服战网账号并解析 customer_token */
 async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
   const normalized = bnet.replace("＃", "#").trim();
   if (SEARCH_BNET_METHOD === "GET") {
@@ -989,14 +986,12 @@ async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
   });
 }
 
-/** 2. 查询玩家基础名片与段位 */
 async function queryCard(customerToken: string): Promise<DashenResponse> {
   return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryCard`, {
     params: { token: customerToken },
   });
 }
 
-/** 3. 查询玩家赛季统计汇总 */
 async function queryCountInfo(
   customerToken: string,
   gameMode: CnGameMode
@@ -1006,7 +1001,6 @@ async function queryCountInfo(
   });
 }
 
-/** 4. 查询玩家近期战绩列表 */
 async function queryMatchList(
   customerToken: string,
   gameMode: CnGameMode,
@@ -1017,7 +1011,6 @@ async function queryMatchList(
   });
 }
 
-/** 5. 查询单场对局详情 */
 async function queryMatchInfo(
   customerToken: string,
   matchId: string
@@ -1043,10 +1036,6 @@ function isSafeCallbackData(data: string): boolean {
   return Buffer.byteLength(data, "utf8") <= 64;
 }
 
-/**
- * 清洗字符串中的 UTF-16 代理对字符（0xD800 ~ 0xDFFF）、字面量代理对转义及控制字符，
- * 并记录发现的异常字符码元以便在 Vercel Logs 中排查。
- */
 function sanitizeSafeText(input: unknown, fieldLabel: string): string {
   const raw = String(input ?? "");
   const anomalies: Array<{ index: number; codeHex: string }> = [];
@@ -1081,12 +1070,6 @@ function sanitizeSafeText(input: unknown, fieldLabel: string): string {
   return step2;
 }
 
-/**
- * 安全序列化 JSON 请求体：
- * 1. 先做 JSON.stringify；
- * 2. 再剥离可能出现的任何 \uD8xx / \uDCxx 代理对转义；
- * 3. 最后做一次 JSON.parse 校验，确保发往 DeepSeek 的请求体 100% 合法 JSON。
- */
 function serializeSafeJsonBody(payload: Record<string, any>): {
   bodyStr: string;
   strippedEscapeCount: number;
@@ -1114,7 +1097,6 @@ function serializeSafeJsonBody(payload: Record<string, any>): {
   return { bodyStr: cleanedJson, strippedEscapeCount };
 }
 
-/** 从嵌套对象中按候选 Key 列表提取第一个非空值 */
 function pickField(obj: any, keys: string[]): any {
   if (!obj || typeof obj !== "object") return undefined;
   for (const key of keys) {
@@ -1125,7 +1107,6 @@ function pickField(obj: any, keys: string[]): any {
   return undefined;
 }
 
-/** 从对象及常见嵌套子对象中提取字段 */
 function pickDeepField(obj: any, keys: string[]): any {
   const direct = pickField(obj, keys);
   if (direct !== undefined) return direct;
@@ -1272,7 +1253,6 @@ function formatTimestamp(ts: any): string {
   return `${month}-${day} ${hour}:${minute}`;
 }
 
-/** 解析单条对局的胜负状态 */
 function parseMatchResultBadge(m: any): string {
   const rawResult = pickDeepField(m, [
     "matchRet",
@@ -1344,7 +1324,6 @@ function parseMatchResultBadge(m: any): string {
   return "⚪平";
 }
 
-/** 解析单条对局的地图名称（兼容文字地图名与 mapGuid 编号） */
 function parseMatchMapName(m: any): string {
   const mapVal = pickDeepField(m, [
     "mapName",
@@ -1389,7 +1368,6 @@ function parseMatchMapName(m: any): string {
   return "未标注地图";
 }
 
-/** 解析单条对局的英雄名称或英雄编号提示 */
 function parseMatchHeroLabel(m: any): string {
   const heroVal = pickDeepField(m, [
     "heroName",
@@ -1410,7 +1388,6 @@ function parseMatchHeroLabel(m: any): string {
   return "";
 }
 
-/** 轻量内存缓存：为单场对局详情按钮分配短 Key */
 const matchCache = new Map<
   string,
   {
@@ -1711,7 +1688,6 @@ async function generateDeepSeekMatchReview(
     bodyLength: requestBodyStr.length,
     promptContextLength: promptContext.length,
     strippedEscapeCount,
-    aroundCol1039: requestBodyStr.slice(990, 1090),
   });
 
   let response: Response;
@@ -1749,8 +1725,6 @@ async function generateDeepSeekMatchReview(
       status: response.status,
       matchId,
       errText: errText.slice(0, 500),
-      aroundCol1039: requestBodyStr.slice(980, 1090),
-      fullPromptContext: promptContext,
     });
     throw new DashenError(
       response.status,
@@ -2395,7 +2369,6 @@ async function buildCnMatchDetailView(refId: string): Promise<{
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
-  // 对齐 queryMatchInfo.md：玩家在 teammateList / enemyList，本局分英雄数据在 heroList
   const teammates: any[] = Array.isArray(detail?.teammateList)
     ? detail.teammateList
     : [];
@@ -2817,6 +2790,7 @@ export default async function handler(
         service: "OW2 CN Stats Telegram Bot",
         runtime: "Vercel Node.js Serverless",
         dashenConfigured: Boolean(DASHEN_ROLE_ID && DASHEN_TOKEN),
+        relayOrigin: DASHEN_RELAY_ORIGIN,
       })
     );
     return;
