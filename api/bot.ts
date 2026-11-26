@@ -393,6 +393,22 @@ function formatTimestamp(ts: any): string {
   return `${mm}-${dd} ${hh}:${mi}`;
 }
 
+/** 翻译常见模式代号，避免直接暴露内部英文枚举 */
+function translateModeCode(rawMode: any): string {
+  if (!rawMode) return "";
+  const s = String(rawMode).trim();
+  const map: Record<string, string> = {
+    LeisurePreset: "快速预设",
+    LeisureOpen: "快速自由",
+    SportPreset: "竞技预设",
+    SportOpen: "竞技自由",
+    SportFight: "竞技交锋",
+    leisure: "快速比赛",
+    sport: "竞技比赛",
+  };
+  return map[s] || s;
+}
+
 /** 解析单条对局的胜负状态 */
 function parseMatchResultBadge(m: any): string {
   const rawResult = pickDeepField(m, [
@@ -443,7 +459,7 @@ function parseMatchResultBadge(m: any): string {
   return "⚪平";
 }
 
-/** 解析单条对局的地图名称（若缺失则返回明确提示而不是笼统的未知地图） */
+/** 解析单条对局的地图名称 */
 function parseMatchMapName(m: any): string {
   const mapVal = pickDeepField(m, [
     "mapName",
@@ -478,7 +494,7 @@ function parseMatchMapName(m: any): string {
     "gameMode",
   ]);
   if (typeof modeVal === "string" && modeVal.trim()) {
-    return `${modeVal.trim()}对局`;
+    return `${translateModeCode(modeVal)}对局`;
   }
 
   return "未标注地图";
@@ -582,7 +598,6 @@ async function buildCnOverviewView(
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
-  // 1. 提取段位信息
   const rankLines: string[] = [];
   if (cardData && typeof cardData === "object") {
     const rankList =
@@ -636,7 +651,6 @@ async function buildCnOverviewView(
     lines.push(`<b>🏆 竞技段位</b>`, ...rankLines, `━━━━━━━━━━━━━━━━━━`);
   }
 
-  // 2. 提取汇总统计信息
   const statsObj =
     (countData &&
       (countData.total || countData.summary || countData.overview || countData)) ||
@@ -738,7 +752,6 @@ async function buildCnOverviewView(
     );
   }
 
-  // 构建交互按钮
   const keyboard = new InlineKeyboard();
   const mCode = gameMode === "sport" ? "s" : "l";
   const nextM = gameMode === "sport" ? "l" : "s";
@@ -786,6 +799,7 @@ async function buildCnMatchListView(
   const lines: string[] = [
     `📋 <b>${escapeHtml(player.nickname)} — 近期战绩（第 ${page} 页）</b>`,
     `模式：${modeLabel}  |  国服`,
+    `<i>说明：数字格式为 消灭/阵亡/助攻（部分接口未返回胜负或地图名时会标注提示）</i>`,
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
@@ -825,7 +839,7 @@ async function buildCnMatchListView(
       const assists = pickDeepField(m, ["assists", "assist", "assistNum"]);
       const kdaStr =
         kills !== undefined || deaths !== undefined
-          ? ` ${formatNum(kills)}/${formatNum(deaths)}${assists !== undefined ? `/${formatNum(assists)}` : ""}`
+          ? ` <b>${formatNum(kills)}/${formatNum(deaths)}${assists !== undefined ? `/${formatNum(assists)}` : ""}</b>`
           : "";
       const timeStr = formatTimestamp(
         pickDeepField(m, [
@@ -898,8 +912,8 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   const detail = unwrapData(res);
 
   const mapName = parseMatchMapName(detail);
-  const modeName = String(
-    pickDeepField(detail, ["gameModeName", "modeName", "gameMode"]) || ""
+  const modeName = translateModeCode(
+    pickDeepField(detail, ["gameModeName", "modeName", "gameMode"])
   );
   const duration = pickDeepField(detail, [
     "duration",
