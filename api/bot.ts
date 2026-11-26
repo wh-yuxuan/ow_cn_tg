@@ -31,7 +31,7 @@ const DASHEN_CUSTOMER_API_BASE =
   "https://datamsapi.ds.163.com/api/overwatch/customer";
 const SEARCH_BNET_ACCOUNT_URL =
   process.env.SEARCH_BNET_ACCOUNT_URL ||
-  "https://datamsapi.ds.163.com/api/overwatch/searchBnetAccount";
+  "https://datamsapi.ds.163.com/v1/a19ld5tool/searchBnetAccount";
 
 const AI_BASE_URL = (
   process.env.AI_BASE_URL || "https://api.deepseek.com"
