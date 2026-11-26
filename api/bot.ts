@@ -867,6 +867,21 @@ async function dashenRequest<T = any>(
   }
 
   if (!response.ok) {
+    console.warn("[Dashen Upstream HTTP Error]", {
+      method,
+      url: url.toString(),
+      status: response.status,
+      payloadMsg: payload?.msg || payload?.message,
+    });
+    if (response.status === 404) {
+      const targetName = String(
+        options?.json?.name || url.searchParams.get("name") || ""
+      );
+      throw new DashenError(
+        404,
+        `❌ 网易大神未找到对应数据（HTTP 404）。请确认战网 ID <code>${escapeHtml(targetName)}</code> 拼写无误且已同步至网易大神。`
+      );
+    }
     const reason = payload.msg || payload.message || `HTTP ${response.status}`;
     throw new DashenError(
       response.status,
@@ -984,15 +999,12 @@ function sanitizeSafeText(input: unknown, fieldLabel: string): string {
   const step2 = step1.replace(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g, "");
 
   if (anomalies.length > 0 || step2 !== step1) {
-    console.warn(
-      `[DeepSeek Sanitize][${fieldLabel}] 清理异常代理对:`,
-      {
-        rawLength: raw.length,
-        surrogateCount: anomalies.length,
-        anomalies: anomalies.slice(0, 10),
-        removedEscapedSurrogates: step1.length - step2.length,
-      }
-    );
+    console.warn(`[DeepSeek Sanitize][${fieldLabel}] 清理异常代理对:`, {
+      rawLength: raw.length,
+      surrogateCount: anomalies.length,
+      anomalies: anomalies.slice(0, 10),
+      removedEscapedSurrogates: step1.length - step2.length,
+    });
   }
 
   return step2;
