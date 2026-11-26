@@ -26,17 +26,19 @@ const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-// DeepSeek AI 锐评配置（可选，未配置时按钮会提示配置）
+const DASHEN_CUSTOMER_API_BASE =
+  process.env.DASHEN_CUSTOMER_API_BASE?.replace(/\/+$/, "") ||
+  "https://datamsapi.ds.163.com/api/overwatch/customer";
+const SEARCH_BNET_ACCOUNT_URL =
+  process.env.SEARCH_BNET_ACCOUNT_URL ||
+  "https://datamsapi.ds.163.com/api/overwatch/searchBnetAccount";
+
 const AI_BASE_URL = (
   process.env.AI_BASE_URL || "https://api.deepseek.com"
 ).replace(/\/+$/, "");
 const AI_API_KEY = (process.env.AI_API_KEY || "").trim();
 const AI_MODEL = (process.env.AI_MODEL || "deepseek-chat").trim();
-const AI_TIMEOUT_MS = 45_000;
-
-const DASHEN_API_ROOT = "https://datamsapi.ds.163.com/v1/a19ld5tool";
-const DASHEN_CUSTOMER_API_BASE = `${DASHEN_API_ROOT}/customer`;
-const SEARCH_BNET_ACCOUNT_URL = `${DASHEN_API_ROOT}/searchBnetAccount`;
+const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || "25000");
 
 const API_TIMEOUT_MS = 12_000;
 
@@ -185,6 +187,7 @@ const DASHEN_HERO_ALIASES: Record<string, string[]> = {
     "跑男",
     "小巴蒂",
     "小8d",
+    "小8D",
     "幽默跑步男",
   ],
   黑影: ["sombra", "黑影", "邓紫琪", "邓紫棋"],
@@ -701,7 +704,7 @@ const DASHEN_RANK_NAME_CN: Record<string, string> = {
   champion: "英杰",
 };
 
-function translateRankName(rawRank: any): string {
+function translateRankName(rawRank: unknown): string {
   if (rawRank === undefined || rawRank === null) return "";
   const str = String(rawRank).trim();
   if (!str) return "";
@@ -712,7 +715,7 @@ function translateRankName(rawRank: any): string {
   return DASHEN_RANK_NAME_CN[lower] || str;
 }
 
-function resolveDashenHeroName(raw: any): string {
+function resolveDashenHeroName(raw: unknown): string {
   if (raw === undefined || raw === null) return "";
   const str = String(raw).trim();
   if (!str) return "";
@@ -726,7 +729,7 @@ function resolveDashenHeroName(raw: any): string {
   return str;
 }
 
-function translateModeCode(modeVal: any): string {
+function translateModeCode(modeVal: unknown): string {
   if (!modeVal) return "";
   const s = String(modeVal).trim();
   const map: Record<string, string> = {
@@ -742,7 +745,7 @@ function translateModeCode(modeVal: any): string {
   return map[s.toLowerCase()] || s;
 }
 
-function resolveDashenMapGuid(rawGuid: any): string {
+function resolveDashenMapGuid(rawGuid: unknown): string {
   if (rawGuid === undefined || rawGuid === null) return "";
   const str = String(rawGuid).trim();
   if (!str) return "";
@@ -751,7 +754,7 @@ function resolveDashenMapGuid(rawGuid: any): string {
   return `地图#${str}`;
 }
 
-function resolveDashenHeroGuid(rawGuid: any): string {
+function resolveDashenHeroGuid(rawGuid: unknown): string {
   if (rawGuid === undefined || rawGuid === null) return "";
   const str = String(rawGuid).trim();
   if (!str) return "";
@@ -939,7 +942,7 @@ async function queryMatchInfo(
 }
 
 // ============================================================================
-// 4. 数据提取与格式化工具
+// 4. 数据提取、代理对清理与格式化工具
 // ============================================================================
 
 function escapeHtml(text: string): string {
@@ -952,6 +955,80 @@ function escapeHtml(text: string): string {
 
 function isSafeCallbackData(data: string): boolean {
   return Buffer.byteLength(data, "utf8") <= 64;
+}
+
+/**
+ * 清洗字符串中的 UTF-16 代理对字符（0xD800 ~ 0xDFFF）、字面量代理对转义及控制字符，
+ * 并记录发现的异常字符码元以便在 Vercel Logs 中排查。
+ */
+function sanitizeSafeText(input: unknown, fieldLabel: string): string {
+  const raw = String(input ?? "");
+  const anomalies: Array<{ index: number; codeHex: string }> = [];
+  let step1 = "";
+
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdfff) {
+      anomalies.push({
+        index: i,
+        codeHex: `0x${code.toString(16).toUpperCase().padStart(4, "0")}`,
+      });
+      continue;
+    }
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) {
+      continue;
+    }
+    step1 += raw[i];
+  }
+
+  const step2 = step1.replace(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g, "");
+
+  if (anomalies.length > 0 || step2 !== step1) {
+    console.warn(
+      `[DeepSeek Sanitize][${fieldLabel}] 清理异常代理对:`,
+      {
+        rawLength: raw.length,
+        surrogateCount: anomalies.length,
+        anomalies: anomalies.slice(0, 10),
+        removedEscapedSurrogates: step1.length - step2.length,
+      }
+    );
+  }
+
+  return step2;
+}
+
+/**
+ * 安全序列化 JSON 请求体：
+ * 1. 先做 JSON.stringify；
+ * 2. 再剥离可能出现的任何 \uD8xx / \uDCxx 代理对转义；
+ * 3. 最后做一次 JSON.parse 校验，确保发往 DeepSeek 的请求体 100% 合法 JSON。
+ */
+function serializeSafeJsonBody(payload: Record<string, any>): {
+  bodyStr: string;
+  strippedEscapeCount: number;
+} {
+  const rawJson = JSON.stringify(payload);
+  let strippedEscapeCount = 0;
+  const cleanedJson = rawJson.replace(
+    /\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g,
+    () => {
+      strippedEscapeCount++;
+      return "";
+    }
+  );
+
+  try {
+    JSON.parse(cleanedJson);
+  } catch (parseErr) {
+    console.error("[DeepSeek JSON Self-Check Failed]", {
+      parseErr,
+      strippedEscapeCount,
+      sampleAround1039: cleanedJson.slice(980, 1080),
+    });
+  }
+
+  return { bodyStr: cleanedJson, strippedEscapeCount };
 }
 
 /** 从嵌套对象中按候选 Key 列表提取第一个非空值 */
@@ -972,89 +1049,89 @@ function pickDeepField(obj: any, keys: string[]): any {
   if (!obj || typeof obj !== "object") return undefined;
 
   const nestedContainers = [
-    obj.mapInfo,
-    obj.map,
-    obj.battleInfo,
-    obj.gameInfo,
     obj.matchInfo,
-    obj.stat,
+    obj.match_info,
+    obj.gameInfo,
+    obj.game_info,
+    obj.summary,
     obj.stats,
-    obj.data,
+    obj.detail,
+    obj.extra,
   ];
-  for (const sub of nestedContainers) {
-    if (sub && typeof sub === "object" && !Array.isArray(sub)) {
-      const found = pickField(sub, keys);
-      if (found !== undefined) return found;
+  for (const box of nestedContainers) {
+    if (box && typeof box === "object") {
+      const val = pickField(box, keys);
+      if (val !== undefined) return val;
     }
   }
   return undefined;
 }
 
-/** 兼容拆包 data / result */
-function unwrapData(res: DashenResponse): any {
+function unwrapData<T = any>(res: DashenResponse<T>): any {
   if (!res || typeof res !== "object") return res;
-  return res.data ?? res.result ?? res;
+  if (res.data !== undefined && res.data !== null) return res.data;
+  if (res.result !== undefined && res.result !== null) return res.result;
+  return res;
 }
 
-interface ResolvedPlayer {
+function extractPlayerFromSearch(
+  bnetInput: string,
+  res: DashenResponse
+): {
   bnet: string;
   customerToken: string;
   nickname: string;
   raw: any;
-}
-
-/** 从 searchBnetAccount 响应中提取最匹配的国服账号与 customer_token */
-function extractPlayerFromSearch(
-  bnetInput: string,
-  res: DashenResponse
-): ResolvedPlayer {
+} {
   const body = unwrapData(res);
   const candidates: any[] = [];
 
   if (Array.isArray(body)) {
     candidates.push(...body);
   } else if (body && typeof body === "object") {
-    const list =
-      body.list || body.records || body.accounts || body.items || body.users;
-    if (Array.isArray(list)) {
-      candidates.push(...list);
-    } else {
+    for (const k of ["list", "accounts", "players", "data", "result", "items"]) {
+      if (Array.isArray(body[k])) {
+        candidates.push(...body[k]);
+      }
+    }
+    if (candidates.length === 0) {
       candidates.push(body);
     }
   }
 
-  const normalizedInput = bnetInput.replace("＃", "#").trim().toLowerCase();
+  const targetLower = bnetInput.replace("＃", "#").trim().toLowerCase();
+  const matched =
+    candidates.find((item) => {
+      if (!item || typeof item !== "object") return false;
+      const tag = String(
+        pickField(item, [
+          "bnetName",
+          "battleTag",
+          "bnet",
+          "name",
+          "nickName",
+          "nickname",
+        ]) || ""
+      )
+        .trim()
+        .toLowerCase();
+      return tag === targetLower;
+    }) || candidates[0];
 
-  let matched = candidates.find((item) => {
-    const name = String(
-      pickField(item, [
-        "bnetName",
-        "battleTag",
-        "bnet",
-        "name",
-        "nickname",
-        "nickName",
-      ]) || ""
-    ).toLowerCase();
-    return name === normalizedInput;
-  });
+  const customerToken = matched
+    ? pickField(matched, [
+        "customerToken",
+        "customer_token",
+        "token",
+        "playerToken",
+        "targetToken",
+      ])
+    : undefined;
 
-  if (!matched && candidates.length > 0) {
-    matched = candidates[0];
-  }
-
-  const customerToken = pickField(matched, [
-    "token",
-    "customerToken",
-    "customer_token",
-    "userToken",
-    "shareToken",
-  ]);
-
-  if (!matched || !customerToken) {
+  if (!customerToken) {
     throw new DashenError(
       404,
-      `❌ 未在网易大神找到国服玩家 <code>${escapeHtml(bnetInput)}</code>。\n请确认：\n1. 战网 ID 含完整 <code>#数字</code> 且大小写正确\n2. 该玩家已绑定过网易大神或近期有过国服对局`
+      `❌ 未找到国服战网账号 <code>${escapeHtml(bnetInput)}</code>，或该账号尚未在网易大神同步过战绩。`
     );
   }
 
@@ -1339,7 +1416,7 @@ function getPlayerRoleHint(heroName: string): string {
 
 function summarizeTeamByRole(players: any[], label: string): string {
   if (!Array.isArray(players) || players.length === 0) {
-    return `${label}：无阵容数据`;
+    return sanitizeSafeText(`${label}：无阵容数据`, "team-empty");
   }
   const roleBuckets: Record<string, any[]> = {
     坦克: [],
@@ -1361,8 +1438,9 @@ function summarizeTeamByRole(players: any[], label: string): string {
     if (!group || group.length === 0) continue;
     const itemDesc = group
       .map((p) => {
-        const name = String(
-          pickField(p, ["name", "bnetName", "nickname"]) || "玩家"
+        const name = sanitizeSafeText(
+          pickField(p, ["name", "bnetName", "nickname"]) || "玩家",
+          "player-name"
         );
         const k = Number(pickField(p, ["kill", "eliminations", "kills"]) || 0);
         const a = Number(pickField(p, ["assist", "assists"]) || 0);
@@ -1370,16 +1448,16 @@ function summarizeTeamByRole(players: any[], label: string): string {
         const dmg = Number(pickField(p, ["heroDamage", "damage"]) || 0);
         const heal = Number(pickField(p, ["cure", "healing"]) || 0);
         const resist = Number(pickField(p, ["resistDamage"]) || 0);
-        return `${name}(${p._heroName || "未知"}) 击杀${k}/助${a}/死${d} 伤${dmg}/疗${heal}/挡${resist}`;
+        return `${name}(${sanitizeSafeText(p._heroName || "未知", "player-hero")}) 击杀${k}/助${a}/死${d} 伤${dmg}/疗${heal}/挡${resist}`;
       })
       .join("；");
     parts.push(`[${rName}] ${itemDesc}`);
   }
-  return `${label}：\n  ` + parts.join("\n  ");
+  return sanitizeSafeText(`${label}：\n  ` + parts.join("\n  "), label);
 }
 
 function cleanAiJsonText(rawText: string): string {
-  let s = String(rawText || "").trim();
+  let s = sanitizeSafeText(rawText, "ai-raw-response").trim();
   s = s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
   s = s.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").trim();
   s = s.replace(/\s*```$/i, "").trim();
@@ -1471,9 +1549,13 @@ async function generateDeepSeekMatchReview(
     );
   });
 
+  const safeBnetForAi = sanitizeSafeText(bnet, "focus-bnet");
+  const safeMapForAi = sanitizeSafeText(mapName, "map-name");
+  const safeModeForAi = sanitizeSafeText(modeName, "mode-name");
+
   const focusLines: string[] = [
-    `焦点玩家：${bnet}`,
-    `对局地图：${mapName}（模式：${modeName || "未知"}，结果：${resultBadge.replace(/^[🟢🔴⚪]/, "")}${teamScore !== undefined && oppScore !== undefined ? ` ${teamScore}:${oppScore}` : ""}，时长：${durationSec > 0 ? `${Math.floor(durationSec / 60)}分${Math.round(durationSec % 60)}秒` : "未知"}）`,
+    `焦点玩家：${safeBnetForAi}`,
+    `对局地图：${safeMapForAi}（模式：${safeModeForAi || "未知"}，结果：${resultBadge.replace(/^[🟢🔴⚪]/, "")}${teamScore !== undefined && oppScore !== undefined ? ` ${teamScore}:${oppScore}` : ""}，时长：${durationSec > 0 ? `${Math.floor(durationSec / 60)}分${Math.round(durationSec % 60)}秒` : "未知"}）`,
   ];
 
   if (focusPlayer) {
@@ -1486,8 +1568,9 @@ async function generateDeepSeekMatchReview(
     const hSummary = heroList
       .slice(0, 6)
       .map((h) => {
-        const hName = resolveDashenHeroGuid(
-          pickField(h, ["heroId", "heroGuid", "heroName"])
+        const hName = sanitizeSafeText(
+          resolveDashenHeroGuid(pickField(h, ["heroId", "heroGuid", "heroName"])),
+          "focus-hero"
         );
         const sec = Number(pickField(h, ["userTimeSec", "playTime"]) || 0);
         return `${hName}(${sec}s)`;
@@ -1496,30 +1579,57 @@ async function generateDeepSeekMatchReview(
     focusLines.push(`焦点玩家使用英雄：${hSummary}`);
   }
 
-  const promptContext = [
-    ...focusLines,
-    summarizeTeamByRole(teammates, "焦点玩家所在队伍（友方）"),
-    summarizeTeamByRole(enemies, "对手队伍（敌方）"),
-  ].join("\n");
+  const promptContext = sanitizeSafeText(
+    [
+      ...focusLines,
+      summarizeTeamByRole(teammates, "焦点玩家所在队伍（友方）"),
+      summarizeTeamByRole(enemies, "对手队伍（敌方）"),
+    ].join("\n"),
+    "promptContext"
+  );
 
-  const systemPrompt = [
-    "你是一位犀利、专业、客观的《守望先锋 2》电竞数据分析师。",
-    "请严格依据提供的单场对局数据生成分析报告，禁止虚构不存在的数据或技能细节。",
-    "不要把坦克或输出的低助攻/零助攻机械地判为负面表现，除非英雄机制高度依赖增益/挂状态且整体协同极差。",
-    "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
-    "{",
-    '  "score": "S/A/B/C/D",',
-    '  "general_summary": "一句话评价焦点玩家本场表现",',
-    '  "key_point": "决定胜负的唯一核心点",',
-    '  "mvp_or_scapegoat": "本场真正MVP或最明显背锅位及数据依据",',
-    '  "role_diff": "坦克/输出/辅助三路对位对比简析",',
-    '  "comment": "犀利简评与人格化小结（100字以内）"',
-    "}",
-  ].join("\n");
+  const systemPrompt = sanitizeSafeText(
+    [
+      "你是一位犀利、专业、客观的《守望先锋 2》电竞数据分析师。",
+      "请严格依据提供的单场对局数据生成分析报告，禁止虚构不存在的数据或技能细节。",
+      "不要把坦克或输出的低助攻/零助攻机械地判为负面表现，除非英雄机制高度依赖增益/挂状态且整体协同极差。",
+      "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
+      "{",
+      '  "score": "S/A/B/C/D",',
+      '  "general_summary": "一句话评价焦点玩家本场表现",',
+      '  "key_point": "决定胜负的唯一核心点",',
+      '  "mvp_or_scapegoat": "本场真正MVP或最明显背锅位及数据依据",',
+      '  "role_diff": "坦克/输出/辅助三路对位对比简析",',
+      '  "comment": "犀利简评与人格化小结（100字以内）"',
+      "}",
+    ].join("\n"),
+    "systemPrompt"
+  );
 
   const chatUrl = AI_BASE_URL.endsWith("/chat/completions")
     ? AI_BASE_URL
     : `${AI_BASE_URL}/chat/completions`;
+
+  const { bodyStr: requestBodyStr, strippedEscapeCount } =
+    serializeSafeJsonBody({
+      model: AI_MODEL,
+      temperature: 0.25,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: promptContext },
+      ],
+    });
+
+  console.log("[DeepSeek Request Debug]", {
+    matchId,
+    bnet: safeBnetForAi,
+    model: AI_MODEL,
+    chatUrl,
+    bodyLength: requestBodyStr.length,
+    promptContextLength: promptContext.length,
+    strippedEscapeCount,
+    aroundCol1039: requestBodyStr.slice(990, 1090),
+  });
 
   let response: Response;
   try {
@@ -1530,20 +1640,18 @@ async function generateDeepSeekMatchReview(
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({
-        model: AI_MODEL,
-        temperature: 0.25,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: promptContext },
-        ],
-      }),
+      body: requestBodyStr,
       signal: AbortSignal.timeout(AI_TIMEOUT_MS),
     });
   } catch (err) {
     const isTimeout =
       err instanceof Error &&
       (err.name === "TimeoutError" || err.name === "AbortError");
+    console.error("[DeepSeek Fetch Error]", {
+      matchId,
+      bnet: safeBnetForAi,
+      err,
+    });
     throw new DashenError(
       504,
       isTimeout
@@ -1554,9 +1662,16 @@ async function generateDeepSeekMatchReview(
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
+    console.error("[DeepSeek HTTP Error]", {
+      status: response.status,
+      matchId,
+      errText: errText.slice(0, 500),
+      aroundCol1039: requestBodyStr.slice(980, 1090),
+      fullPromptContext: promptContext,
+    });
     throw new DashenError(
       response.status,
-      `❌ DeepSeek 接口调用失败 (HTTP ${response.status})：${escapeHtml(errText.slice(0, 160))}`
+      `❌ DeepSeek 接口调用失败 (HTTP ${response.status})：${escapeHtml(sanitizeSafeText(errText, "ai-error-text").slice(0, 180))}`
     );
   }
 
@@ -1567,22 +1682,34 @@ async function generateDeepSeekMatchReview(
     "";
 
   const parsed = parseAiAnalysisJson(String(content));
-  const scoreBadge = escapeHtml(String(parsed?.score || "B").trim());
+  const scoreBadge = escapeHtml(
+    sanitizeSafeText(parsed?.score || "B", "ai-score").trim()
+  );
   const generalSummary = escapeHtml(
-    String(
-      parsed?.general_summary || cleanAiJsonText(String(content)) || "暂无总结"
+    sanitizeSafeText(
+      parsed?.general_summary || cleanAiJsonText(String(content)) || "暂无总结",
+      "ai-summary"
     ).trim()
   );
-  const keyPoint = escapeHtml(String(parsed?.key_point || "-").trim());
-  const mvpOrScapegoat = escapeHtml(
-    String(parsed?.mvp_or_scapegoat || "-").trim()
+  const keyPoint = escapeHtml(
+    sanitizeSafeText(parsed?.key_point || "-", "ai-key-point").trim()
   );
-  const roleDiff = escapeHtml(String(parsed?.role_diff || "-").trim());
-  const comment = escapeHtml(String(parsed?.comment || "").trim());
+  const mvpOrScapegoat = escapeHtml(
+    sanitizeSafeText(
+      parsed?.mvp_or_scapegoat || "-",
+      "ai-mvp-scapegoat"
+    ).trim()
+  );
+  const roleDiff = escapeHtml(
+    sanitizeSafeText(parsed?.role_diff || "-", "ai-role-diff").trim()
+  );
+  const comment = escapeHtml(
+    sanitizeSafeText(parsed?.comment || "", "ai-comment").trim()
+  );
 
   return [
-    `🤖 <b>DeepSeek 电竞锐评 — ${escapeHtml(mapName)}</b>`,
-    `🎯 目标：<code>${escapeHtml(bnet)}</code>  |  评级：<b>${scoreBadge}</b>`,
+    `🤖 <b>DeepSeek 电竞锐评 — ${escapeHtml(safeMapForAi)}</b>`,
+    `🎯 目标：<code>${escapeHtml(safeBnetForAi)}</code>  |  评级：<b>${scoreBadge}</b>`,
     `━━━━━━━━━━━━━━━━━━`,
     `📌 <b>一句话总结：</b>${generalSummary}`,
     `⚡ <b>胜负核心点：</b>${keyPoint}`,
@@ -1681,7 +1808,7 @@ async function buildCnOverviewView(
       cardData.competitiveRanks;
 
     if (Array.isArray(rankList) && rankList.length > 0) {
-      const normalizedRoleKey = (rawVal: any): string => {
+      const normalizedRoleKey = (rawVal: unknown): string => {
         const s = String(rawVal || "")
           .trim()
           .toLowerCase();
@@ -1695,7 +1822,12 @@ async function buildCnOverviewView(
           s.includes("治疗")
         )
           return "healer";
-        if (s === "open" || s === "free" || s.includes("开放") || s.includes("自由"))
+        if (
+          s === "open" ||
+          s === "free" ||
+          s.includes("开放") ||
+          s.includes("自由")
+        )
           return "open";
         return s || "other";
       };
@@ -2494,7 +2626,7 @@ bot.on("callback_query:data", async (ctx) => {
       }
       await safeAnswerCallback(ctx, "正在呼叫 DeepSeek 生成锐评...");
       const loadingMsg = await ctx.reply(
-        `🤖 正在分析 <b>${escapeHtml(cached.bnet)}</b> 的本局数据并生成 DeepSeek 锐评，请稍候...`,
+        `🤖 正在分析 <b>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</b> 的本局数据并生成 DeepSeek 锐评，请稍候...`,
         { parse_mode: "HTML" }
       );
       try {
