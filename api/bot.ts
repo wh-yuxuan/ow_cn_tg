@@ -1912,7 +1912,7 @@ async function buildCnMatchDetailView(refId: string): Promise<{
 
   if (allPlayers.length > 0) {
     lines.push(`<b>👥 本局参战玩家（消灭/助攻/阵亡 | 伤害 | 治疗）</b>`);
-    for (const p of allPlayers.slice(0, 10)) {
+    for (const p of allPlayers.slice(0, 16)) {
       const pName = String(
         pickField(p, ["name", "bnetName", "nickname", "playerName"]) || "玩家"
       );
