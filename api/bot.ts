@@ -2153,61 +2153,18 @@ async function generateDeepSeekHiddenMmrReview(
           "mmr-hero"
         );
         const hGames = pickField(h, ["matchSum", "totalCount", "matchCount"]);
-        const hWin = pickField(h, ["winRate", "winRatio"]);
-        const hKda = pickField(h, ["kda", "avgKda"]);
-        return `${hCn}(${hGames ?? "-"}场, 胜率${hWin ?? "-"}%, KDA ${hKda ?? "-"})`;
-      })
-      .join("；");
-    mmrLines.push(`主力英雄池数据：${heroSummary}`);
-  }
-
-  // 4. 近期 8 场战绩流水趋势（判断当下隐藏分波动方向：连胜抬分期 vs 连败制裁期）
-  const recentMatches: any[] = Array.isArray(listBody)
-    ? listBody
-    : Array.isArray(listBody?.matchList)
-      ? listBody.matchList
-      : listBody?.list || listBody?.records || listBody?.items || [];
-
-  if (recentMatches.length > 0) {
-    let recentWins = 0;
-    let recentLosses = 0;
-    const seq: string[] = [];
-    for (const m of recentMatches.slice(0, 8)) {
-      const badge = parseMatchResultBadge(m);
-      if (badge.includes("胜")) {
-        recentWins++;
-        seq.push("胜");
-      } else if (badge.includes("负")) {
-        recentLosses++;
-        seq.push("负");
-      } else {
-        seq.push("平");
-      }
-    }
-    mmrLines.push(
-      `近期 ${Math.min(recentMatches.length, 8)} 场战绩走势（由近及远）：[${seq.join("-")}]（${recentWins}胜 ${recentLosses}负）`
-    );
-  }
-
-  const promptContext = sanitizeSafeText(
-    mmrLines.join("\n"),
-    "mmrPromptContext"
-  );
-
-  const systemPrompt = sanitizeSafeText(
-    [
-      "你是一位精通《守望先锋 2》隐藏分（MMR）匹配机制与排位算法的资深电竞数据分析师。",
-      "请结合玩家的明面段位、各位置胜率与场次、综合 KDA 与场均效率、主力英雄表现、近期战绩走势以及量化初算参考，反推出该玩家当前的【真实隐性实力段位】与【系统匹配状态】。",
-      "推理原则：",
-      "1. 若某位置胜率显著高于52%~55%且KDA优秀，说明隐性MMR高于明面段位（处于系统抬分期/连胜加分通道）；",
-      "2. 若胜率低于47%且阵亡偏高，说明隐性MMR低于明面段位（段位虚高/守门员或系统平衡负重期）；",
-      "3. 若尚未定级或查看的是快速模式，则根据其场均战斗效率、KDA 与英雄池胜率推断其等效竞技实力分段。",
-      "严格基于提供的数据推理，禁止编造不存在的数据。",
+      '严格基于提供的数据推理，禁止编造不存在的数据。',
       "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
       "{",
-      '  "surface_rank": "当前主要明面段位概括（如：白金 2 / 钻石 4，若无定级写未定级）",',
-      '  "estimated_real_rank": "AI 推演的真实隐性实力段位区间（如：钻石 4 ~ 钻石 3）",',
-      '  "mmr_status": "MMR状态标签（如：隐藏分溢价 · 系统抬分期 / 段位虚高 · 守门员承压期 / 实力与分段高度匹配 / 炸鱼级降维打击）",',
+      '  "role_comparisons": [',
+      '    {',
+      '      "role": "职责名称，如 坦克 / 输出 / 支援 / 开放",',
+      '      "current_rank": "当前明面段位，如 白金 2（若未定级写 未定级）",',
+      '      "hidden_rank": "隐藏分推演段位，如 白金 4 ~ 白金 3（若未定级写 等效白金 3）",',
+      '      "tag": "简短状态标签，如 承压掉分期 / 抬分上分期 / 分段匹配"',
+      "    }",
+      "  ],",
+      '  "mmr_status": "总体MMR状态标签（如：部分位置隐藏分溢价 · 另一位置承压掉分）",',
       '  "evidence": "核心数据推导依据（结合段位胜率背离度、KDA效率、主力英雄或近期走势说明，90字以内）",',
       '  "trend_advice": "冲分建议与下一步预测（70字以内）"',
       "}",
@@ -2221,15 +2178,57 @@ async function generateDeepSeekHiddenMmrReview(
     `mmr:${gameMode}:${safeBnetForAi}`
   );
 
-  const surfaceRank = escapeHtml(
-    sanitizeSafeText(parsed?.surface_rank || "未定级 / 综合评估", "mmr-surface").trim()
-  );
-  const estRealRank = escapeHtml(
-    sanitizeSafeText(
-      parsed?.estimated_real_rank || "推演中",
-      "mmr-est"
-    ).trim()
-  );
+  const roleIconMap: Record<string, string> = {
+    坦克: "🛡",
+    重装: "🛡",
+    输出: "⚔️",
+    dps: "⚔️",
+    支援: "💉",
+    辅助: "💉",
+    开放: "🎲",
+    自由: "🎲",
+  };
+
+  const rawComparisons = Array.isArray(parsed?.role_comparisons)
+    ? parsed.role_comparisons
+    : [];
+  const comparisonLines: string[] = [];
+
+  for (const item of rawComparisons) {
+    const roleRaw = sanitizeSafeText(item?.role || "", "mmr-comp-role").trim();
+    const curRank = sanitizeSafeText(
+      item?.current_rank || "未定级",
+      "mmr-comp-cur"
+    ).trim();
+    const hidRank = sanitizeSafeText(
+      item?.hidden_rank || "推演中",
+      "mmr-comp-hid"
+    ).trim();
+    const tag = sanitizeSafeText(item?.tag || "", "mmr-comp-tag").trim();
+    if (!roleRaw) continue;
+
+    const icon = roleIconMap[roleRaw.toLowerCase()] || roleIconMap[roleRaw] || "•";
+    comparisonLines.push(
+      `${icon} <b>${escapeHtml(roleRaw)}</b>：<code>${escapeHtml(curRank)}</code>  ➔  <b>${escapeHtml(hidRank)}</b>${tag ? `（${escapeHtml(tag)}）` : ""}`
+    );
+  }
+
+  // 若模型未按数组返回，兜底使用旧字段展示
+  if (comparisonLines.length === 0) {
+    const surfaceRank = escapeHtml(
+      sanitizeSafeText(
+        parsed?.surface_rank || "未定级 / 综合评估",
+        "mmr-surface"
+      ).trim()
+    );
+    const estRealRank = escapeHtml(
+      sanitizeSafeText(parsed?.estimated_real_rank || "推演中", "mmr-est").trim()
+    );
+    comparisonLines.push(
+      `📌 <b>综合</b>：<code>${surfaceRank}</code>  ➔  <b>${estRealRank}</b>`
+    );
+  }
+
   const mmrStatus = escapeHtml(
     sanitizeSafeText(
       parsed?.mmr_status || "实力与当前分段基本匹配",
@@ -2248,8 +2247,9 @@ async function generateDeepSeekHiddenMmrReview(
 
   return [
     `🔮 <b>DeepSeek 隐性段位评估 — ${escapeHtml(safeBnetForAi)}</b>`,
-    `📌 明面段位：<b>${surfaceRank}</b>  ➔  真实推演：<b>${estRealRank}</b>`,
-    `⚖️ 匹配状态：<b>「${mmrStatus}」</b>（${modeLabel}）`,
+    `📋 <b>各职责段位对照（当前段位 ➔ 隐藏分推演）：</b>`,
+    ...comparisonLines,
+    `⚖️ <b>总体状态：</b>「${mmrStatus}」（${modeLabel}）`,
     `━━━━━━━━━━━━━━━━━━`,
     `📊 <b>数据推导依据：</b>${evidence}`,
     `🧭 <b>冲分趋势预测：</b><i>${trendAdvice}</i>`,
