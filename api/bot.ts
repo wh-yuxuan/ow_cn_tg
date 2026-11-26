@@ -841,25 +841,60 @@ async function dashenRequest<T = any>(
     const isTimeout =
       err instanceof Error &&
       (err.name === "TimeoutError" || err.name === "AbortError");
+    const errObj = err as any;
+    const causeObj = errObj?.cause as any;
+    console.error("[Dashen Fetch Network Error]", {
+      method,
+      url: url.toString(),
+      isTimeout,
+      name: errObj?.name,
+      message: errObj?.message,
+      code: errObj?.code,
+      causeName: causeObj?.name,
+      causeMessage: causeObj?.message,
+      causeCode: causeObj?.code,
+      roleIdConfigured: Boolean(DASHEN_ROLE_ID),
+      tokenConfigured: Boolean(DASHEN_TOKEN),
+      region: process.env.VERCEL_REGION || "unknown",
+    });
     throw new DashenError(
       504,
       isTimeout
         ? "⏳ 请求网易大神接口超时，请稍后重试（建议在 Vercel 设置将 Function Region 改为香港 hkg1 或新加坡 sin1）。"
-        : "🌐 网络异常，无法连接至网易大神接口。"
+        : `🌐 网络异常，无法连接至网易大神接口（${escapeHtml(String(causeObj?.code || errObj?.code || errObj?.message || "连接失败"))}）。`
     );
   }
 
   if (response.status === 401 || response.status === 403) {
+    const errBodyPreview = await response
+      .text()
+      .then((t) => t.slice(0, 300))
+      .catch(() => "");
+    console.warn("[Dashen Auth Error]", {
+      method,
+      url: url.toString(),
+      status: response.status,
+      errBodyPreview,
+      region: process.env.VERCEL_REGION || "unknown",
+    });
     throw new DashenError(
       response.status,
       "🔐 网易大神鉴权失败（HTTP 401/403），可能是 <code>DASHEN_TOKEN</code> 已过期，请重新登录网易大神网页版提取更新。"
     );
   }
 
+  const rawText = await response.text().catch(() => "");
   let payload: DashenResponse<T>;
   try {
-    payload = (await response.json()) as DashenResponse<T>;
+    payload = JSON.parse(rawText) as DashenResponse<T>;
   } catch {
+    console.warn("[Dashen Non-JSON Response]", {
+      method,
+      url: url.toString(),
+      status: response.status,
+      rawTextPreview: rawText.slice(0, 300),
+      region: process.env.VERCEL_REGION || "unknown",
+    });
     throw new DashenError(
       response.status,
       `❌ 网易大神返回非 JSON 内容 (HTTP ${response.status})，可能触发了风控拦截。`
@@ -872,6 +907,8 @@ async function dashenRequest<T = any>(
       url: url.toString(),
       status: response.status,
       payloadMsg: payload?.msg || payload?.message,
+      rawTextPreview: rawText.slice(0, 300),
+      region: process.env.VERCEL_REGION || "unknown",
     });
     if (response.status === 404) {
       const targetName = String(
@@ -895,6 +932,13 @@ async function dashenRequest<T = any>(
     payload.code !== 200
   ) {
     const reason = payload.msg || payload.message || `错误码 ${payload.code}`;
+    console.warn("[Dashen Business Code Error]", {
+      method,
+      url: url.toString(),
+      code: payload.code,
+      reason,
+      region: process.env.VERCEL_REGION || "unknown",
+    });
     throw new DashenError(
       400,
       `⚠️ 网易大神返回异常（code=${payload.code}）：${escapeHtml(String(reason))}`
