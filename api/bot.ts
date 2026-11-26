@@ -26,6 +26,14 @@ const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+// DeepSeek AI 锐评配置（可选，未配置时按钮会提示配置）
+const AI_BASE_URL = (
+  process.env.AI_BASE_URL || "https://api.deepseek.com"
+).replace(/\/+$/, "");
+const AI_API_KEY = (process.env.AI_API_KEY || "").trim();
+const AI_MODEL = (process.env.AI_MODEL || "deepseek-chat").trim();
+const AI_TIMEOUT_MS = 45_000;
+
 const DASHEN_API_ROOT = "https://datamsapi.ds.163.com/v1/a19ld5tool";
 const DASHEN_CUSTOMER_API_BASE = `${DASHEN_API_ROOT}/customer`;
 const SEARCH_BNET_ACCOUNT_URL = `${DASHEN_API_ROOT}/searchBnetAccount`;
@@ -1278,6 +1286,313 @@ function cacheMatchRef(
 }
 
 // ============================================================================
+// 4.5 DeepSeek 电竞锐评生成逻辑
+// ============================================================================
+
+function getPlayerRoleHint(heroName: string): string {
+  const s = String(heroName || "").trim();
+  if (!s) return "未知";
+  if (
+    [
+      "莱因哈特",
+      "温斯顿",
+      "路霸",
+      "查莉娅",
+      "D.Va",
+      "末日铁拳",
+      "奥丽莎",
+      "破坏球",
+      "渣客女王",
+      "西格玛",
+      "拉玛刹",
+      "毛加",
+      "骇灾",
+      "金驭",
+      "D.Mon",
+    ].includes(s)
+  ) {
+    return "坦克";
+  }
+  if (
+    [
+      "天使",
+      "禅雅塔",
+      "卢西奥",
+      "安娜",
+      "布丽吉塔",
+      "莫伊拉",
+      "巴蒂斯特",
+      "雾子",
+      "生命之梭",
+      "伊拉锐",
+      "朱诺",
+      "无漾",
+      "瑞稀",
+      "飞天猫",
+      "血律",
+    ].includes(s)
+  ) {
+    return "支援";
+  }
+  return "输出";
+}
+
+function summarizeTeamByRole(players: any[], label: string): string {
+  if (!Array.isArray(players) || players.length === 0) {
+    return `${label}：无阵容数据`;
+  }
+  const roleBuckets: Record<string, any[]> = {
+    坦克: [],
+    输出: [],
+    支援: [],
+    未知: [],
+  };
+  for (const p of players) {
+    const hName = resolveDashenHeroGuid(
+      pickField(p, ["heroGuid", "heroId", "heroName"])
+    );
+    const r = getPlayerRoleHint(hName);
+    (roleBuckets[r] || roleBuckets["未知"]).push({ ...p, _heroName: hName });
+  }
+
+  const parts: string[] = [];
+  for (const rName of ["坦克", "输出", "支援", "未知"]) {
+    const group = roleBuckets[rName];
+    if (!group || group.length === 0) continue;
+    const itemDesc = group
+      .map((p) => {
+        const name = String(
+          pickField(p, ["name", "bnetName", "nickname"]) || "玩家"
+        );
+        const k = Number(pickField(p, ["kill", "eliminations", "kills"]) || 0);
+        const a = Number(pickField(p, ["assist", "assists"]) || 0);
+        const d = Number(pickField(p, ["death", "deaths"]) || 0);
+        const dmg = Number(pickField(p, ["heroDamage", "damage"]) || 0);
+        const heal = Number(pickField(p, ["cure", "healing"]) || 0);
+        const resist = Number(pickField(p, ["resistDamage"]) || 0);
+        return `${name}(${p._heroName || "未知"}) 击杀${k}/助${a}/死${d} 伤${dmg}/疗${heal}/挡${resist}`;
+      })
+      .join("；");
+    parts.push(`[${rName}] ${itemDesc}`);
+  }
+  return `${label}：\n  ` + parts.join("\n  ");
+}
+
+function cleanAiJsonText(rawText: string): string {
+  let s = String(rawText || "").trim();
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  s = s.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").trim();
+  s = s.replace(/\s*```$/i, "").trim();
+  return s;
+}
+
+function parseAiAnalysisJson(rawText: string): any | null {
+  const cleaned = cleanAiJsonText(rawText);
+  if (!cleaned) return null;
+  const candidates = [cleaned];
+  const matchedBlocks = cleaned.match(/\{[\s\S]*\}/g);
+  if (matchedBlocks) {
+    candidates.push(...matchedBlocks);
+  }
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // 继续尝试下一个候选 JSON 片段
+    }
+  }
+  return null;
+}
+
+async function generateDeepSeekMatchReview(
+  bnet: string,
+  customerToken: string,
+  matchId: string
+): Promise<string> {
+  if (!AI_API_KEY) {
+    throw new DashenError(
+      400,
+      "⚠️ 尚未配置 DeepSeek 接口密钥（<code>AI_API_KEY</code>）。请在 Vercel 环境变量中添加 <code>AI_API_KEY</code> 后重新部署。"
+    );
+  }
+
+  const res = await queryMatchInfo(customerToken, matchId);
+  const rawDetail = unwrapData(res);
+  const detail =
+    rawDetail &&
+    typeof rawDetail === "object" &&
+    rawDetail.data &&
+    typeof rawDetail.data === "object"
+      ? rawDetail.data
+      : rawDetail;
+
+  const mapName = parseMatchMapName(detail);
+  const modeName = translateModeCode(
+    pickDeepField(detail, ["gameModeName", "modeName", "gameMode"])
+  );
+  const resultBadge = parseMatchResultBadge(detail);
+  const teamScore = pickDeepField(detail, ["teamScore", "myScore"]);
+  const oppScore = pickDeepField(detail, ["opponentScore", "enemyScore"]);
+  const durationSec = Number(
+    pickDeepField(detail, [
+      "gameTimeSec",
+      "duration",
+      "gameTime",
+      "matchDuration",
+    ]) || 0
+  );
+
+  const teammates: any[] = Array.isArray(detail?.teammateList)
+    ? detail.teammateList
+    : [];
+  const enemies: any[] = Array.isArray(detail?.enemyList)
+    ? detail.enemyList
+    : [];
+  const heroList: any[] = Array.isArray(detail?.heroList)
+    ? detail.heroList
+    : [];
+
+  const targetLower = bnet.trim().toLowerCase();
+  const targetPrefix = targetLower.split("#")[0];
+  const focusPlayer = [...teammates, ...enemies].find((p: any) => {
+    const pName = String(
+      pickField(p, ["name", "bnetName", "nickname"]) || ""
+    )
+      .trim()
+      .toLowerCase();
+    const pToken = String(
+      pickField(p, ["customerToken", "customer_token"]) || ""
+    ).trim();
+    return (
+      (customerToken && pToken === customerToken) ||
+      pName === targetLower ||
+      (targetPrefix && pName.startsWith(`${targetPrefix}#`))
+    );
+  });
+
+  const focusLines: string[] = [
+    `焦点玩家：${bnet}`,
+    `对局地图：${mapName}（模式：${modeName || "未知"}，结果：${resultBadge.replace(/^[🟢🔴⚪]/, "")}${teamScore !== undefined && oppScore !== undefined ? ` ${teamScore}:${oppScore}` : ""}，时长：${durationSec > 0 ? `${Math.floor(durationSec / 60)}分${Math.round(durationSec % 60)}秒` : "未知"}）`,
+  ];
+
+  if (focusPlayer) {
+    focusLines.push(
+      `焦点玩家本局统计：消灭 ${pickField(focusPlayer, ["kill", "eliminations", "kills"]) ?? "-"} / 助攻 ${pickField(focusPlayer, ["assist", "assists"]) ?? "-"} / 阵亡 ${pickField(focusPlayer, ["death", "deaths"]) ?? "-"}，伤害 ${pickField(focusPlayer, ["heroDamage", "damage"]) ?? "-"}，治疗 ${pickField(focusPlayer, ["cure", "healing"]) ?? "-"}，抵伤 ${pickField(focusPlayer, ["resistDamage"]) ?? "-"}`
+    );
+  }
+
+  if (heroList.length > 0) {
+    const hSummary = heroList
+      .slice(0, 6)
+      .map((h) => {
+        const hName = resolveDashenHeroGuid(
+          pickField(h, ["heroId", "heroGuid", "heroName"])
+        );
+        const sec = Number(pickField(h, ["userTimeSec", "playTime"]) || 0);
+        return `${hName}(${sec}s)`;
+      })
+      .join("、");
+    focusLines.push(`焦点玩家使用英雄：${hSummary}`);
+  }
+
+  const promptContext = [
+    ...focusLines,
+    summarizeTeamByRole(teammates, "焦点玩家所在队伍（友方）"),
+    summarizeTeamByRole(enemies, "对手队伍（敌方）"),
+  ].join("\n");
+
+  const systemPrompt = [
+    "你是一位犀利、专业、客观的《守望先锋 2》电竞数据分析师。",
+    "请严格依据提供的单场对局数据生成分析报告，禁止虚构不存在的数据或技能细节。",
+    "不要把坦克或输出的低助攻/零助攻机械地判为负面表现，除非英雄机制高度依赖增益/挂状态且整体协同极差。",
+    "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
+    '{',
+    '  "score": "S/A/B/C/D",',
+    '  "general_summary": "一句话评价焦点玩家本场表现",',
+    '  "key_point": "决定胜负的唯一核心点",',
+    '  "mvp_or_scapegoat": "本场真正MVP或最明显背锅位及数据依据",',
+    '  "role_diff": "坦克/输出/辅助三路对位对比简析",',
+    '  "comment": "犀利简评与人格化小结（100字以内）"',
+    '}',
+  ].join("\n");
+
+  const chatUrl = AI_BASE_URL.endsWith("/chat/completions")
+    ? AI_BASE_URL
+    : `${AI_BASE_URL}/chat/completions`;
+
+  let response: Response;
+  try {
+    response = await fetch(chatUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${AI_API_KEY}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        temperature: 0.25,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: promptContext },
+        ],
+      }),
+      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const isTimeout =
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError");
+    throw new DashenError(
+      504,
+      isTimeout
+        ? "⏳ DeepSeek 生成锐评超时，请稍后再试。"
+        : "🌐 请求 DeepSeek 接口网络异常，请稍后再试。"
+    );
+  }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new DashenError(
+      response.status,
+      `❌ DeepSeek 接口调用失败 (HTTP ${response.status})：${escapeHtml(errText.slice(0, 160))}`
+    );
+  }
+
+  const aiPayload: any = await response.json().catch(() => null);
+  const content =
+    aiPayload?.choices?.[0]?.message?.content ??
+    aiPayload?.data?.choices?.[0]?.message?.content ??
+    "";
+
+  const parsed = parseAiAnalysisJson(String(content));
+  const scoreBadge = escapeHtml(String(parsed?.score || "B").trim());
+  const generalSummary = escapeHtml(
+    String(parsed?.general_summary || cleanAiJsonText(String(content)) || "暂无总结").trim()
+  );
+  const keyPoint = escapeHtml(String(parsed?.key_point || "-").trim());
+  const mvpOrScapegoat = escapeHtml(
+    String(parsed?.mvp_or_scapegoat || "-").trim()
+  );
+  const roleDiff = escapeHtml(String(parsed?.role_diff || "-").trim());
+  const comment = escapeHtml(String(parsed?.comment || "").trim());
+
+  return [
+    `🤖 <b>DeepSeek 电竞锐评 — ${escapeHtml(mapName)}</b>`,
+    `🎯 目标：<code>${escapeHtml(bnet)}</code>  |  评级：<b>${scoreBadge}</b>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `📌 <b>一句话总结：</b>${generalSummary}`,
+    `⚡ <b>胜负核心点：</b>${keyPoint}`,
+    `🏅 <b>MVP / 背锅位：</b>${mvpOrScapegoat}`,
+    `🔀 <b>三路对位对比：</b>${roleDiff}`,
+    comment ? `💬 <b>分析师锐评：</b><i>${comment}</i>` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+// ============================================================================
 // 5. 视图渲染：国服总览卡片 / 近期战绩列表 / 单场对局详情
 // ============================================================================
 
@@ -1328,7 +1643,7 @@ async function buildCnOverviewView(
       typeof gameTimeVal === "number"
         ? `${formatNum(gameTimeVal, 1)}h`
         : escapeHtml(String(gameTimeVal));
-    metaParts.push(`时长 ${gtStr}`);
+    metaParts.push(`总时长 ${gtStr}`);
   }
   if (totalMatchVal !== undefined) {
     metaParts.push(`累计 ${formatNum(totalMatchVal)} 场`);
@@ -1353,7 +1668,7 @@ async function buildCnOverviewView(
   const roleOrder = ["tank", "dps", "healer", "open"];
 
   const rankLines: string[] = [];
-  if (cardData && typeof cardData === "object") {
+  if (gameMode === "sport" && cardData && typeof cardData === "object") {
     const rankList =
       countData?.guideCountData ||
       cardData.guideCountData ||
@@ -1584,8 +1899,13 @@ async function buildCnOverviewView(
       if (valItems) statParts.push(`📊 场均数值：${valItems}`);
     }
 
+    const modeSectionTitle =
+      gameMode === "sport"
+        ? "📊 赛季竞技汇总（职责预设）"
+        : "📊 赛季快速汇总（职责预设）";
+
     if (statParts.length > 0) {
-      lines.push(`<b>📊 赛季汇总战绩</b>`, ...statParts);
+      lines.push(`<b>${modeSectionTitle}</b>`, ...statParts);
     } else {
       lines.push(
         `📭 已成功拉取该玩家数据，但当前模式下暂无汇总统计（可切换模式或查看近期战绩）。`
@@ -1600,7 +1920,9 @@ async function buildCnOverviewView(
       cardData?.heroList ||
       cardData?.heroes;
     if (Array.isArray(heroList) && heroList.length > 0) {
-      lines.push(`━━━━━━━━━━━━━━━━━━`, `<b>🔥 常用英雄</b>`);
+      const heroTitle =
+        gameMode === "sport" ? "🔥 竞技常用英雄" : "🔥 快速常用英雄";
+      lines.push(`━━━━━━━━━━━━━━━━━━`, `<b>${heroTitle}</b>`);
       for (const h of heroList.slice(0, 5)) {
         const hName =
           pickField(h, [
@@ -1936,7 +2258,11 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   const mCode = entry.mode === "sport" ? "s" : "l";
   const backListCb = `m:${mCode}:1:${entry.bnet}`;
   const backHomeCb = `o:${mCode}:${entry.bnet}`;
+  const aiCb = `a:${refId}`;
 
+  if (isSafeCallbackData(aiCb)) {
+    keyboard.text("🤖 DeepSeek 锐评", aiCb).row();
+  }
   if (isSafeCallbackData(backListCb)) {
     keyboard.text("⬅️ 返回战绩列表", backListCb);
   }
@@ -2121,6 +2447,48 @@ bot.on("callback_query:data", async (ctx) => {
       const { text, keyboard } = await buildCnMatchDetailView(parts[1]);
       await safeEditMessage(ctx, text, keyboard);
       await safeAnswerCallback(ctx);
+      return;
+    }
+
+    if (action === "a" && parts.length === 2) {
+      const cached = matchCache.get(parts[1]);
+      if (!cached || Date.now() > cached.expiresAt) {
+        await safeAnswerCallback(
+          ctx,
+          "对局缓存已过期，请返回战绩列表重新打开详情。",
+          true
+        );
+        return;
+      }
+      await safeAnswerCallback(ctx, "正在呼叫 DeepSeek 生成锐评...");
+      const loadingMsg = await ctx.reply(
+        `🤖 正在分析 <b>${escapeHtml(cached.bnet)}</b> 的本局数据并生成 DeepSeek 锐评，请稍候...`,
+        { parse_mode: "HTML" }
+      );
+      try {
+        const reviewText = await generateDeepSeekMatchReview(
+          cached.bnet,
+          cached.customerToken,
+          cached.matchId
+        );
+        await ctx.api.editMessageText(
+          loadingMsg.chat.id,
+          loadingMsg.message_id,
+          reviewText,
+          { parse_mode: "HTML" }
+        );
+      } catch (aiErr) {
+        const errHtml =
+          aiErr instanceof DashenError
+            ? aiErr.message
+            : "❌ DeepSeek 锐评生成失败，请稍后重试。";
+        await ctx.api.editMessageText(
+          loadingMsg.chat.id,
+          loadingMsg.message_id,
+          errHtml,
+          { parse_mode: "HTML" }
+        );
+      }
       return;
     }
 
