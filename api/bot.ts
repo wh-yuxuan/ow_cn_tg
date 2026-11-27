@@ -2916,12 +2916,53 @@ async function handlePendingAdminInput(
     if (state.action === "admin_user_view") {
       const r = await relayInternalRequest<{
         ok: boolean;
-        data: { user: UserProfileDto; recentLogs: any[] };
+        data: {
+          isList?: boolean;
+          totalUsers?: number;
+          users?: UserProfileDto[];
+          user?: UserProfileDto;
+          recentLogs?: any[];
+        };
       }>("GET", "/internal/admin/user", {
         params: { query: text.trim() },
         operatorId,
       });
-      const u = r.data.user;
+
+      if (r.data?.isList) {
+        const list = r.data.users || [];
+        const totalUsers = Number(r.data.totalUsers ?? list.length);
+        const lines = [
+          `👥 <b>用户列表概览（显示最近 ${list.length} 人 / 共 ${totalUsers} 人）</b>`,
+          `━━━━━━━━━━━━━━━━━━`,
+        ];
+        if (list.length === 0) {
+          lines.push("暂无已注册用户。");
+        } else {
+          for (const item of list) {
+            const nick = escapeHtml(item.nickname || "未设置");
+            const uname = item.username ? `@${escapeHtml(item.username)}` : "无";
+            const vipFlag = item.vipActive ? "👑VIP" : "";
+            const banFlag = item.isBanned ? "🚫封禁" : "";
+            const admFlag = item.isAdmin
+              ? item.adminRole === "super_admin"
+                ? "超管"
+                : "普管"
+              : "";
+            const tags = [admFlag, vipFlag, banFlag].filter(Boolean).join("·");
+            lines.push(
+              `• <code>${item.tgId}</code> ${nick} (${uname}) · <b>${item.quota}</b>次 · 邀${item.inviteCount}人${tags ? ` [${tags}]` : ""}`
+            );
+          }
+        }
+        await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+        return;
+      }
+
+      const u = r.data?.user;
+      if (!u) {
+        await ctx.reply("⚠️ 未获取到用户详情数据。");
+        return;
+      }
       const logLines = (r.data.recentLogs || []).map((l) => {
         const sign = Number(l.changeAmount) >= 0 ? `+${l.changeAmount}` : `${l.changeAmount}`;
         return `• <code>${sign}</code> (${escapeHtml(l.reason)}) → 余额 ${l.balanceAfter}  <i>[${escapeHtml(l.createdAt)}]</i>${l.detail ? ` · ${escapeHtml(l.detail)}` : ""}`;
@@ -3999,7 +4040,7 @@ bot.on("callback_query:data", async (ctx) => {
         setPendingAdminInput(operatorId, "admin_user_view");
         await safeAnswerCallback(ctx);
         await ctx.reply(
-          `🛠 <b>${ADMIN_PROMPT_TAGS.admin_user_view}</b>\n请输入要查询的用户 TG 数字 ID 或 @用户名：`,
+          `🛠 <b>${ADMIN_PROMPT_TAGS.admin_user_view}</b>\n请输入要查询的用户 TG 数字 ID 或 @用户名（输入 <code>all</code> 可查看最近用户列表）：`,
           { parse_mode: "HTML", reply_markup: { force_reply: true, selective: true } }
         );
         return;
@@ -4269,7 +4310,6 @@ bot.on("callback_query:data", async (ctx) => {
           json: { targetTgId: targetId, permCode },
           operatorId,
         });
-        ctx.callbackQuery.data = `ad:a_edit:${targetId}`;
         const r = await relayInternalRequest<{ ok: boolean; data: any }>(
           "GET",
           "/internal/admin/admins",
