@@ -2,7 +2,7 @@
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（独立部署版）
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
- * 数据来源：Cloudflare Tunnel 反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool) + DeepSeek AI 锐评
+ * 数据来源：腾讯云中转 + MySQL 5.7.44 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool) + DeepSeek AI 锐评
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -14,6 +14,7 @@ import { Bot, Context, InlineKeyboard, webhookCallback } from "grammy";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+const RELAY_SECRET = (process.env.RELAY_SECRET || "").trim();
 
 const DASHEN_ROLE_ID = Number(process.env.DASHEN_ROLE_ID || "0");
 const DASHEN_TOKEN = (process.env.DASHEN_TOKEN || "").trim();
@@ -26,10 +27,8 @@ const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-// 默认指向已配置 Cloudflare Tunnel 的域名 https://ow.eyy8.top，同时支持环境变量覆盖
 const DASHEN_RELAY_ORIGIN =
-  process.env.DASHEN_RELAY_ORIGIN?.replace(/\/+$/, "") ||
-  "https://ow.eyy8.top";
+  process.env.DASHEN_RELAY_ORIGIN?.replace(/\/+$/, "") || "https://ow.eyy8.top";
 const DASHEN_API_ROOT =
   process.env.DASHEN_API_ROOT?.replace(/\/+$/, "") ||
   `${DASHEN_RELAY_ORIGIN}/v1/a19ld5tool`;
@@ -61,6 +60,7 @@ if (!BOT_TOKEN) {
 }
 
 type CnGameMode = "sport" | "leisure";
+type RoastType = "match" | "self" | "mmr";
 
 interface DashenResponse<T = any> {
   code?: number;
@@ -71,8 +71,46 @@ interface DashenResponse<T = any> {
   [key: string]: any;
 }
 
+interface RelayResponse<T = any> {
+  ok?: boolean;
+  code?: string;
+  error?: string;
+  data?: T;
+  hit?: boolean;
+  record?: any;
+  [key: string]: any;
+}
+
+interface UserProfileDto {
+  tgId: number;
+  nickname: string;
+  username: string;
+  quota: number;
+  isBanned: boolean;
+  vipExpireAt: string | null;
+  vipActive: boolean;
+  invitedBy: number | null;
+  inviteCount: number;
+  lastCheckinDate: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  isAdmin: boolean;
+  adminRole: "super_admin" | "admin" | null;
+  roastUnlimited: boolean;
+}
+
+interface AdminMeDto {
+  tgId: number;
+  remark: string;
+  role: "super_admin" | "admin";
+  permissions: string[];
+  isActive: boolean;
+  allPermissions: string[];
+  permissionLabels: Record<string, string>;
+}
+
 // ============================================================================
-// 2. 英雄 / 地图 / 段位 / 指标 映射表（源自 query_tool.json 与 chara.py）
+// 2. 英雄 / 地图 / 段位 / 指标 映射表
 // ============================================================================
 
 const DASHEN_HERO_ALIASES: Record<string, string[]> = {
@@ -282,8 +320,29 @@ const DASHEN_HERO_ALIASES: Record<string, string[]> = {
   ],
   金驭: ["domina", "金驭", "金玉", "禁欲", "金御", "妈妈", "妈", "总裁", "金羽"],
   埃姆雷: ["emre", "埃姆雷", "m雷", "猫雷", "艾姆雷"],
-  飞天猫: ["jetpackcat", "jetpack-cat", "飞天猫", "耄耋", "哈基米", "猫", "猫猫", "豪猫", "键帽"],
-  瑞稀: ["mizuki", "瑞稀", "瑞希", "斗笠男", "绿帽", "乌龟", "锁链男", "斗笠摩西", "河童", "镰刀男"],
+  飞天猫: [
+    "jetpackcat",
+    "jetpack-cat",
+    "飞天猫",
+    "耄耋",
+    "哈基米",
+    "猫",
+    "猫猫",
+    "豪猫",
+    "键帽",
+  ],
+  瑞稀: [
+    "mizuki",
+    "瑞稀",
+    "瑞希",
+    "斗笠男",
+    "绿帽",
+    "乌龟",
+    "锁链男",
+    "斗笠摩西",
+    "河童",
+    "镰刀男",
+  ],
   西拉: ["sierra", "西拉", "鸟人", "拉稀", "埃科", "希拉", "茜拉", "拉西"],
   死怨: ["shion", "死怨"],
   "D.Mon": ["d.mon"],
@@ -729,12 +788,8 @@ function resolveDashenHeroName(raw: unknown): string {
   const str = String(raw).trim();
   if (!str) return "";
   const lower = str.toLowerCase();
-  if (HERO_ALIAS_TO_CN[lower]) {
-    return HERO_ALIAS_TO_CN[lower];
-  }
-  if (DASHEN_HERO_GUID_NAMES[lower]) {
-    return DASHEN_HERO_GUID_NAMES[lower];
-  }
+  if (HERO_ALIAS_TO_CN[lower]) return HERO_ALIAS_TO_CN[lower];
+  if (DASHEN_HERO_GUID_NAMES[lower]) return DASHEN_HERO_GUID_NAMES[lower];
   return str;
 }
 
@@ -768,15 +823,13 @@ function resolveDashenHeroGuid(rawGuid: unknown): string {
   const str = String(rawGuid).trim();
   if (!str) return "";
   const lower = str.toLowerCase();
-  if (HERO_ALIAS_TO_CN[lower]) {
-    return HERO_ALIAS_TO_CN[lower];
-  }
+  if (HERO_ALIAS_TO_CN[lower]) return HERO_ALIAS_TO_CN[lower];
   if (DASHEN_HERO_GUID_NAMES[lower]) return DASHEN_HERO_GUID_NAMES[lower];
   return `英雄#${str}`;
 }
 
 // ============================================================================
-// 3. 网易大神 HTTP 客户端
+// 3. 网易大神与腾讯云 MySQL 内部接口客户端
 // ============================================================================
 
 class DashenError extends Error {
@@ -787,6 +840,14 @@ class DashenError extends Error {
     super(message);
     this.name = "DashenError";
   }
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function ensureDashenCredentials(): void {
@@ -850,45 +911,18 @@ async function dashenRequest<T = any>(
     const isTimeout =
       err instanceof Error &&
       (err.name === "TimeoutError" || err.name === "AbortError");
-    const errObj = err as any;
-    const causeObj = errObj?.cause as any;
-    console.error("[Dashen Fetch Network Error]", {
-      method,
-      url: url.toString(),
-      isTimeout,
-      name: errObj?.name,
-      message: errObj?.message,
-      code: errObj?.code,
-      causeName: causeObj?.name,
-      causeMessage: causeObj?.message,
-      causeCode: causeObj?.code,
-      roleIdConfigured: Boolean(DASHEN_ROLE_ID),
-      tokenConfigured: Boolean(DASHEN_TOKEN),
-      region: process.env.VERCEL_REGION || "unknown",
-    });
     throw new DashenError(
       504,
       isTimeout
-        ? "⏳ 请求网易大神接口超时，请稍后重试（建议在 Vercel 设置将 Function Region 改为香港 hkg1 或新加坡 sin1）。"
-        : `🌐 网络异常，无法连接至网易大神接口（${escapeHtml(String(causeObj?.code || errObj?.code || errObj?.message || "连接失败"))}）。`
+        ? "⏳ 请求网易大神接口超时，请稍后重试。"
+        : "🌐 网络异常，无法连接至网易大神接口。"
     );
   }
 
   if (response.status === 401 || response.status === 403) {
-    const errBodyPreview = await response
-      .text()
-      .then((t) => t.slice(0, 300))
-      .catch(() => "");
-    console.warn("[Dashen Auth Error]", {
-      method,
-      url: url.toString(),
-      status: response.status,
-      errBodyPreview,
-      region: process.env.VERCEL_REGION || "unknown",
-    });
     throw new DashenError(
       response.status,
-      "🔐 网易大神鉴权失败（HTTP 401/403），可能是 <code>DASHEN_TOKEN</code> 已过期，请重新登录网易大神网页版提取更新。"
+      "🔐 网易大神鉴权失败（HTTP 401/403），请检查 <code>DASHEN_TOKEN</code> 是否有效。"
     );
   }
 
@@ -897,44 +931,15 @@ async function dashenRequest<T = any>(
   try {
     payload = JSON.parse(rawText) as DashenResponse<T>;
   } catch {
-    console.warn("[Dashen Non-JSON Response]", {
-      method,
-      url: url.toString(),
-      status: response.status,
-      rawTextPreview: rawText.slice(0, 300),
-      region: process.env.VERCEL_REGION || "unknown",
-    });
     throw new DashenError(
       response.status,
-      `❌ 网易大神返回非 JSON 内容 (HTTP ${response.status})，可能触发了风控拦截。`
+      `❌ 网易大神返回非 JSON 内容 (HTTP ${response.status})。`
     );
   }
 
   if (!response.ok) {
-    const errMsgFromBody =
-      payload?.msg || payload?.message || (payload as any)?.error_msg;
-    console.warn("[Dashen Upstream HTTP Error]", {
-      method,
-      url: url.toString(),
-      status: response.status,
-      payloadMsg: errMsgFromBody,
-      rawTextPreview: rawText.slice(0, 300),
-      region: process.env.VERCEL_REGION || "unknown",
-    });
-    if (response.status === 404) {
-      const targetName = String(
-        options?.json?.[SEARCH_BNET_PARAM_KEY] ||
-          options?.json?.name ||
-          url.searchParams.get(SEARCH_BNET_PARAM_KEY) ||
-          url.searchParams.get("name") ||
-          ""
-      );
-      throw new DashenError(
-        404,
-        `❌ 网易大神接口返回 404（${escapeHtml(String(errMsgFromBody || "Route Not Found"))}）。请确认搜索接口路径、登录凭证或战网 ID <code>${escapeHtml(targetName)}</code>。`
-      );
-    }
-    const reason = errMsgFromBody || `HTTP ${response.status}`;
+    const reason =
+      payload?.msg || payload?.message || `HTTP ${response.status}`;
     throw new DashenError(
       response.status,
       `❌ 上游接口错误：${escapeHtml(String(reason))}`
@@ -947,13 +952,6 @@ async function dashenRequest<T = any>(
     payload.code !== 200
   ) {
     const reason = payload.msg || payload.message || `错误码 ${payload.code}`;
-    console.warn("[Dashen Business Code Error]", {
-      method,
-      url: url.toString(),
-      code: payload.code,
-      reason,
-      region: process.env.VERCEL_REGION || "unknown",
-    });
     throw new DashenError(
       400,
       `⚠️ 网易大神返回异常（code=${payload.code}）：${escapeHtml(String(reason))}`
@@ -1021,17 +1019,110 @@ async function queryMatchInfo(
   });
 }
 
+/** 调用腾讯云中转的 MySQL 业务/管理内部接口 */
+async function relayInternalRequest<T = any>(
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  options?: {
+    params?: Record<string, string | number | undefined>;
+    json?: Record<string, any>;
+    operatorId?: number;
+  }
+): Promise<RelayResponse<T>> {
+  const url = new URL(`${DASHEN_RELAY_ORIGIN}${path}`);
+  if (options?.params) {
+    for (const [k, v] of Object.entries(options.params)) {
+      if (v !== undefined && v !== "") {
+        url.searchParams.set(k, String(v));
+      }
+    }
+  }
+
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  if (RELAY_SECRET) {
+    headers["x-relay-secret"] = RELAY_SECRET;
+  }
+  if (options?.operatorId) {
+    headers["x-operator-id"] = String(options.operatorId);
+  }
+
+  let body: string | undefined;
+  if ((method === "POST" || method === "DELETE") && options?.json) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(options.json);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      method,
+      headers,
+      body,
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+  } catch {
+    throw new DashenError(
+      504,
+      "🌐 无法连接至腾讯云业务服务（请检查中转服务与域名是否正常）。"
+    );
+  }
+
+  const rawText = await response.text().catch(() => "");
+  let payload: RelayResponse<T>;
+  try {
+    payload = JSON.parse(rawText) as RelayResponse<T>;
+  } catch {
+    throw new DashenError(
+      response.status,
+      `❌ 业务服务返回异常响应 (HTTP ${response.status})。`
+    );
+  }
+
+  if (!response.ok || payload?.ok === false) {
+    const errMsg = payload?.error || `HTTP ${response.status}`;
+    throw new DashenError(response.status, errMsg);
+  }
+
+  return payload;
+}
+
+function getTgUserMeta(ctx: Context): {
+  tgId: number;
+  nickname: string;
+  username: string;
+} {
+  const from = ctx.from;
+  const tgId = Number(from?.id || 0);
+  const fullName = [from?.first_name || "", from?.last_name || ""]
+    .join(" ")
+    .trim();
+  const nickname = fullName || from?.username || (tgId ? `用户${tgId}` : "");
+  const username = String(from?.username || "").replace(/^@+/, "");
+  return { tgId, nickname, username };
+}
+
+async function ensureUserRecord(
+  ctx: Context,
+  inviterId?: number | null
+): Promise<{
+  isNewUser: boolean;
+  inviteRewardGranted: boolean;
+  inviterId: number | null;
+  inviteRewardQuota: number;
+  user: UserProfileDto;
+}> {
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  const res = await relayInternalRequest("POST", "/internal/user/ensure", {
+    json: { tgId, nickname, username, inviterId: inviterId || null },
+  });
+  return res.data;
+}
+
 // ============================================================================
 // 4. 数据提取、代理对清理与格式化工具
 // ============================================================================
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
 
 function isSafeCallbackData(data: string): boolean {
   return Buffer.byteLength(data, "utf8") <= 64;
@@ -1064,7 +1155,6 @@ function sanitizeSafeText(input: unknown, fieldLabel: string): string {
       rawLength: raw.length,
       surrogateCount: anomalies.length,
       anomalies: anomalies.slice(0, 10),
-      removedEscapedSurrogates: step1.length - step2.length,
     });
   }
 
@@ -1084,17 +1174,6 @@ function serializeSafeJsonBody(payload: Record<string, any>): {
       return "";
     }
   );
-
-  try {
-    JSON.parse(cleanedJson);
-  } catch (parseErr) {
-    console.error("[DeepSeek JSON Self-Check Failed]", {
-      parseErr,
-      strippedEscapeCount,
-      sampleAround1039: cleanedJson.slice(980, 1080),
-    });
-  }
-
   return { bodyStr: cleanedJson, strippedEscapeCount };
 }
 
@@ -1423,34 +1502,41 @@ function cacheMatchRef(
   return shortId;
 }
 
-/** 锐评防重复请求锁与结果缓存（避免同一对局/数据重复消耗 DeepSeek 额度） */
-interface RoastCacheEntry {
+// ============================================================================
+// 4.5 锐评缓存（MySQL 持久化 + 内存热缓存）与资格扣次流程
+// ============================================================================
+
+interface RoastMemoryEntry {
   text: string;
   expiresAt: number;
   chatMessages: Map<number, number>;
 }
 
-const ROAST_MATCH_CACHE_TTL_MS = 60 * 60 * 1000; // 单局战绩不变，缓存 60 分钟
-const ROAST_PROFILE_CACHE_TTL_MS = 15 * 60 * 1000; // 赛季总览与隐性段位，缓存 15 分钟
+const MATCH_ROAST_MEM_TTL_MS = 24 * 60 * 60 * 1000;
+const PROFILE_ROAST_TTL_MS = 24 * 60 * 60 * 1000;
 
-const roastResultCache = new Map<string, RoastCacheEntry>();
+const roastMemoryCache = new Map<string, RoastMemoryEntry>();
 const roastInFlight = new Map<string, number>();
 
-function pruneRoastCache(): void {
-  if (roastResultCache.size <= 300) return;
+function pruneRoastMemory(): void {
+  if (roastMemoryCache.size <= 300) return;
   const now = Date.now();
-  for (const [k, v] of roastResultCache.entries()) {
+  for (const [k, v] of roastMemoryCache.entries()) {
     if (now > v.expiresAt) {
-      roastResultCache.delete(k);
+      roastMemoryCache.delete(k);
     }
   }
 }
 
-async function runCachedRoastFlow(
+async function runPaidRoastFlow(
   ctx: Context,
   options: {
     cacheKey: string;
-    ttlMs: number;
+    roastType: RoastType;
+    quotaReason: "roast_match" | "roast_self" | "roast_mmr";
+    gameMode?: string;
+    bnet: string;
+    matchId?: string;
     startToast: string;
     loadingHtml: string;
     errorFallbackHtml: string;
@@ -1459,46 +1545,26 @@ async function runCachedRoastFlow(
 ): Promise<void> {
   const {
     cacheKey,
-    ttlMs,
+    roastType,
+    quotaReason,
+    gameMode = "",
+    bnet,
+    matchId = "",
     startToast,
     loadingHtml,
     errorFallbackHtml,
     generator,
   } = options;
-  const now = Date.now();
 
-  // 1. 命中已生成的锐评缓存：优先引用原点评消息，若原消息已删或跨会话则直接发缓存内容
-  const cached = roastResultCache.get(cacheKey);
-  if (cached && now < cached.expiresAt) {
-    await safeAnswerCallback(ctx, "♻️ 已为你调出之前的锐评结果（未重复消耗额度）");
-    const chatId = ctx.chat?.id;
-    const prevMsgId = chatId ? cached.chatMessages.get(chatId) : undefined;
-
-    if (chatId && prevMsgId) {
-      try {
-        await ctx.reply(
-          "♻️ <b>该数据已经锐评过啦</b>，已为你引用上方之前的点评结果 👆",
-          {
-            parse_mode: "HTML",
-            reply_parameters: { message_id: prevMsgId },
-          }
-        );
-        return;
-      } catch {
-        // 原消息可能已被删除，降级为直接发送缓存的完整锐评
-        cached.chatMessages.delete(chatId);
-      }
-    }
-
-    const resent = await ctx.reply(
-      `${cached.text}\n\n<i>♻️ 已命中锐评缓存，直接展示上次点评结果</i>`,
-      { parse_mode: "HTML" }
-    );
-    cached.chatMessages.set(resent.chat.id, resent.message_id);
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  if (!tgId) {
+    await safeAnswerCallback(ctx, "无法识别你的 Telegram 账号信息。", true);
     return;
   }
 
-  // 2. 正在生成中：拦截并发重复点击，给出友好等待提示
+  const now = Date.now();
+
+  // 1. 正在生成中：防并发连点
   const inFlightSince = roastInFlight.get(cacheKey);
   if (inFlightSince && now - inFlightSince < AI_TIMEOUT_MS + 10_000) {
     await safeAnswerCallback(
@@ -1508,26 +1574,161 @@ async function runCachedRoastFlow(
     return;
   }
 
-  // 3. 首次触发：加锁并调用 DeepSeek
+  // 2. 先查内存缓存，再查 MySQL 持久化缓存（命中缓存直接复用，不扣次数）
+  let reusedHtml: string | null = null;
+  let reusedFromDb = false;
+
+  const memCached = roastMemoryCache.get(cacheKey);
+  if (memCached && now < memCached.expiresAt) {
+    reusedHtml = memCached.text;
+    const chatId = ctx.chat?.id;
+    const prevMsgId = chatId ? memCached.chatMessages.get(chatId) : undefined;
+    if (chatId && prevMsgId) {
+      try {
+        await safeAnswerCallback(
+          ctx,
+          "♻️ 已命中锐评缓存（不扣次数），已引用上方结果"
+        );
+        await ctx.reply(
+          "♻️ <b>该数据已有缓存锐评</b>（不重复消耗次数），已为你引用上方结果 👆",
+          {
+            parse_mode: "HTML",
+            reply_parameters: { message_id: prevMsgId },
+          }
+        );
+        return;
+      } catch {
+        memCached.chatMessages.delete(chatId);
+      }
+    }
+  } else {
+    try {
+      const dbRes = await relayInternalRequest(
+        "GET",
+        "/internal/roast/cache/get",
+        {
+          params: { cacheKey, roastType },
+        }
+      );
+      if (dbRes?.hit && dbRes?.record?.reviewHtml) {
+        reusedHtml = String(dbRes.record.reviewHtml);
+        reusedFromDb = true;
+      }
+    } catch {
+      // 缓存查询失败不阻断正常生成流程
+    }
+  }
+
+  if (reusedHtml) {
+    await safeAnswerCallback(
+      ctx,
+      "♻️ 已命中锐评缓存，直接展示（不扣次数）"
+    );
+    const noteSuffix =
+      roastType === "match"
+        ? "<i>♻️ 已复用单局历史锐评缓存（不扣次数）</i>"
+        : "<i>♻️ 已命中 24 小时内锐评缓存（不扣次数）</i>";
+    const sent = await ctx.reply(`${reusedHtml}\n\n${noteSuffix}`, {
+      parse_mode: "HTML",
+    });
+
+    pruneRoastMemory();
+    const existingMem = roastMemoryCache.get(cacheKey);
+    const chatMap = existingMem?.chatMessages || new Map<number, number>();
+    chatMap.set(sent.chat.id, sent.message_id);
+    roastMemoryCache.set(cacheKey, {
+      text: reusedHtml,
+      expiresAt: now + (roastType === "match" ? MATCH_ROAST_MEM_TTL_MS : PROFILE_ROAST_TTL_MS),
+      chatMessages: chatMap,
+    });
+    if (reusedFromDb) {
+      // 已从 MySQL 复用
+    }
+    return;
+  }
+
+  // 3. 未命中缓存：先校验用户/VIP/管理员锐评资格（不扣次）
+  try {
+    await relayInternalRequest("POST", "/internal/roast/authorize", {
+      json: { tgId, nickname, username },
+    });
+  } catch (authErr) {
+    const rawMsg =
+      authErr instanceof DashenError
+        ? authErr.message
+        : "⚠️ 锐评资格校验失败，请稍后重试。";
+    await safeAnswerCallback(ctx, rawMsg.replace(/<[^>]+>/g, "").slice(0, 180), true);
+    return;
+  }
+
+  // 4. 加锁并呼叫 DeepSeek 生成
   roastInFlight.set(cacheKey, now);
   await safeAnswerCallback(ctx, startToast);
 
   const loadingMsg = await ctx.reply(loadingHtml, { parse_mode: "HTML" });
   try {
     const resultText = await generator();
+
+    // 5. 生成成功后执行扣次（管理员与有效 VIP 自动跳过扣次）
+    let quotaInfoText = "";
+    try {
+      const consumeRes = await relayInternalRequest(
+        "POST",
+        "/internal/roast/consume",
+        {
+          json: {
+            tgId,
+            roastType: quotaReason,
+            detail: `${bnet}${matchId ? ` · #${matchId}` : ""}`,
+          },
+        }
+      );
+      if (consumeRes?.data?.unlimited) {
+        quotaInfoText = "<i>👑 尊享免限（未扣次数）</i>";
+      } else if (consumeRes?.data?.consumed) {
+        quotaInfoText = `<i>⚡ 本次消耗 1 次，剩余 <b>${Number(consumeRes.data.quota ?? 0)}</b> 次</i>`;
+      }
+    } catch (consumeErr) {
+      console.error("[Consume Quota After Roast Error]", consumeErr);
+    }
+
+    const finalHtml = quotaInfoText
+      ? `${resultText}\n\n${quotaInfoText}`
+      : resultText;
+
     await ctx.api.editMessageText(
       loadingMsg.chat.id,
       loadingMsg.message_id,
-      resultText,
+      finalHtml,
       { parse_mode: "HTML" }
     );
 
-    pruneRoastCache();
+    // 6. 写入 MySQL 持久化缓存与内存缓存
+    try {
+      await relayInternalRequest("POST", "/internal/roast/cache/set", {
+        json: {
+          cacheKey,
+          roastType,
+          gameMode,
+          bnet,
+          matchId,
+          reviewHtml: resultText,
+        },
+      });
+    } catch (saveErr) {
+      console.error("[Save Roast Cache Error]", saveErr);
+    }
+
+    pruneRoastMemory();
     const chatMessages = new Map<number, number>();
     chatMessages.set(loadingMsg.chat.id, loadingMsg.message_id);
-    roastResultCache.set(cacheKey, {
+    roastMemoryCache.set(cacheKey, {
       text: resultText,
-      expiresAt: Date.now() + ttlMs,
+      expiresAt:
+        Date.now() +
+        (roastType === "match"
+          ? MATCH_ROAST_MEM_TTL_MS
+          : PROFILE_ROAST_TTL_MS),
       chatMessages,
     });
   } catch (aiErr) {
@@ -1545,7 +1746,7 @@ async function runCachedRoastFlow(
 }
 
 // ============================================================================
-// 4.5 DeepSeek 电竞锐评生成逻辑（单场对局锐评 + 个人赛季画像 + 隐性段位评估）
+// 5. DeepSeek 电竞锐评生成逻辑
 // ============================================================================
 
 function getPlayerRoleHint(heroName: string): string {
@@ -1681,23 +1882,13 @@ async function callDeepSeekJson(
     ? AI_BASE_URL
     : `${AI_BASE_URL}/chat/completions`;
 
-  const { bodyStr: requestBodyStr, strippedEscapeCount } =
-    serializeSafeJsonBody({
-      model: AI_MODEL,
-      temperature: 0.35,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
-
-  console.log("[DeepSeek Request Debug]", {
-    debugTag,
+  const { bodyStr: requestBodyStr } = serializeSafeJsonBody({
     model: AI_MODEL,
-    chatUrl,
-    bodyLength: requestBodyStr.length,
-    userPromptLength: userPrompt.length,
-    strippedEscapeCount,
+    temperature: 0.35,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
   });
 
   let response: Response;
@@ -1727,11 +1918,6 @@ async function callDeepSeekJson(
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
-    console.error("[DeepSeek HTTP Error]", {
-      status: response.status,
-      debugTag,
-      errText: errText.slice(0, 500),
-    });
     throw new DashenError(
       response.status,
       `❌ DeepSeek 接口调用失败 (HTTP ${response.status})：${escapeHtml(sanitizeSafeText(errText, "ai-error-text").slice(0, 180))}`
@@ -1748,7 +1934,6 @@ async function callDeepSeekJson(
   return { parsed: parseAiAnalysisJson(content), rawContent: content };
 }
 
-/** 1. 单场对局锐评 */
 async function generateDeepSeekMatchReview(
   bnet: string,
   customerToken: string,
@@ -1910,7 +2095,6 @@ async function generateDeepSeekMatchReview(
     .join("\n");
 }
 
-/** 2. 个人赛季综合实力与画像锐评（点击「🤖 锐评自己」触发） */
 async function generateDeepSeekPlayerReview(
   bnet: string,
   gameMode: CnGameMode
@@ -2050,9 +2234,9 @@ async function generateDeepSeekPlayerReview(
       "请只输出纯 JSON（不要 markdown 代码块包裹，不要额外解释文字），格式如下：",
       "{",
       '  "tier": "S/A/B/C/D",',
-      '  "persona_tag": "4-10字的玩家画像称号，如：六边形补位战神 / 信仰型源氏绝活哥 / 快乐送头先锋 / 偏科重装大腿",',
-      '  "strength_and_weakness": "最强上分密码（英雄/位置）与最明显短板/重灾区点名（结合胜率、段位或场次）",',
-      '  "playstyle_diagnosis": "从场均击杀/阵亡/伤害/治疗比例诊断其真实打法风格（如稳健老六、莽夫换命流、纯混子等）",',
+      '  "persona_tag": "4-10字的玩家画像称号",',
+      '  "strength_and_weakness": "最强上分密码与最明显短板/重灾区点名",',
+      '  "playstyle_diagnosis": "从场均击杀/阵亡/伤害/治疗比例诊断其真实打法风格",',
       '  "roast_comment": "一针见血、接地气、带点幽默吐槽的赛季综合锐评与上分建议（120字以内）"',
       "}",
     ].join("\n"),
@@ -2103,7 +2287,6 @@ async function generateDeepSeekPlayerReview(
   ].join("\n");
 }
 
-/** 3. 隐性段位 / 真实隐藏分（MMR）推演评估（点击「🔮 隐性段位评估」触发） */
 async function generateDeepSeekHiddenMmrReview(
   bnet: string,
   gameMode: CnGameMode
@@ -2132,7 +2315,6 @@ async function generateDeepSeekHiddenMmrReview(
     `评估模式：${modeLabel}`,
   ];
 
-  // 1. 提取各位置明面段位、胜率、场次、KDA 与量化推演偏移值
   const tierBaseRank: Record<string, number> = {
     青铜: 1,
     白银: 2,
@@ -2219,7 +2401,6 @@ async function generateDeepSeekHiddenMmrReview(
     mmrLines.push(`算法侧胜率/KDA 偏移初算：${heuristicHints.join("；")}`);
   }
 
-  // 2. 赛季总体实战效率
   const statsObj =
     (countData &&
       (countData.presetsSummaryData ||
@@ -2247,7 +2428,6 @@ async function generateDeepSeekHiddenMmrReview(
     );
   }
 
-  // 3. 主力英雄池表现
   const heroList =
     countData?.presetsHeroUseSummaryList ||
     countData?.heroList ||
@@ -2278,7 +2458,6 @@ async function generateDeepSeekHiddenMmrReview(
     mmrLines.push(`主力英雄池表现：${heroSummary}`);
   }
 
-  // 4. 最近 8 场战绩连胜/连败走势
   const recentMatches: any[] = Array.isArray(listBody)
     ? listBody
     : Array.isArray(listBody?.matchList)
@@ -2339,8 +2518,8 @@ async function generateDeepSeekHiddenMmrReview(
       '      "tag": "简短状态标签，如 承压掉分期 / 抬分上分期 / 分段匹配"',
       "    }",
       "  ],",
-      '  "mmr_status": "总体MMR状态标签（如：部分位置隐藏分溢价 · 另一位置承压掉分）",',
-      '  "evidence": "核心数据推导依据（结合段位胜率背离度、KDA效率、主力英雄或近期走势说明，90字以内）",',
+      '  "mmr_status": "总体MMR状态标签",',
+      '  "evidence": "核心数据推导依据（90字以内）",',
       '  "trend_advice": "冲分建议与下一步预测（70字以内）"',
       "}",
     ].join("\n"),
@@ -2389,18 +2568,7 @@ async function generateDeepSeekHiddenMmrReview(
   }
 
   if (comparisonLines.length === 0) {
-    const surfaceRank = escapeHtml(
-      sanitizeSafeText(
-        parsed?.surface_rank || "未定级 / 综合评估",
-        "mmr-surface"
-      ).trim()
-    );
-    const estRealRank = escapeHtml(
-      sanitizeSafeText(parsed?.estimated_real_rank || "推演中", "mmr-est").trim()
-    );
-    comparisonLines.push(
-      `📌 <b>综合</b>：<code>${surfaceRank}</code>  ➔  <b>${estRealRank}</b>`
-    );
+    comparisonLines.push(`📌 <b>综合</b>：<code>综合评估</code>  ➔  <b>推演中</b>`);
   }
 
   const mmrStatus = escapeHtml(
@@ -2431,7 +2599,7 @@ async function generateDeepSeekHiddenMmrReview(
 }
 
 // ============================================================================
-// 5. 视图渲染：国服总览卡片 / 近期战绩列表 / 单场对局详情
+// 6. 视图渲染：国服总览 / 近期战绩 / 对局详情 / 个人中心 / 管理员面板
 // ============================================================================
 
 async function buildCnOverviewView(
@@ -2628,34 +2796,6 @@ async function buildCnOverviewView(
           ]) || "其他"
         );
         rankLines.push(formatRoleLine(ex.key, ex.item, rawLabel));
-      }
-    } else {
-      const tank = pickField(cardData, ["tankRank", "tankTier", "tankLevel"]);
-      const dps = pickField(cardData, [
-        "damageRank",
-        "dpsRank",
-        "damageTier",
-        "attackRank",
-      ]);
-      const sup = pickField(cardData, [
-        "supportRank",
-        "healRank",
-        "supportTier",
-      ]);
-      const open = pickField(cardData, ["openRank", "freeRank", "openTier"]);
-      if (tank || dps || sup || open) {
-        rankLines.push(
-          `• 🛡 坦克：<b>${escapeHtml(translateRankName(tank) || "未定级")}</b>`
-        );
-        rankLines.push(
-          `• ⚔️ 输出：<b>${escapeHtml(translateRankName(dps) || "未定级")}</b>`
-        );
-        rankLines.push(
-          `• 💉 支援：<b>${escapeHtml(translateRankName(sup) || "未定级")}</b>`
-        );
-        rankLines.push(
-          `• 🎲 开放：<b>${escapeHtml(translateRankName(open) || "未定级")}</b>`
-        );
       }
     }
   }
@@ -2988,7 +3128,7 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   if (!entry || Date.now() > entry.expiresAt) {
     throw new DashenError(
       410,
-      "⏳ 该对局详情缓存已过期（无服务器实例已回收），请重新点击「近期战绩流水」刷新后再点详情。"
+      "⏳ 该对局详情缓存已过期，请重新点击「近期战绩流水」刷新后再点详情。"
     );
   }
 
@@ -3156,13 +3296,175 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   return { text: lines.join("\n"), keyboard };
 }
 
+function buildUserCenterView(
+  ctx: Context,
+  user: UserProfileDto
+): { text: string; keyboard: InlineKeyboard } {
+  const botUsername = String(ctx.me?.username || "").trim();
+  const inviteLink = botUsername
+    ? `https://t.me/${botUsername}?start=inv_${user.tgId}`
+    : `/start inv_${user.tgId}`;
+
+  const vipLabel = user.isAdmin
+    ? user.adminRole === "super_admin"
+      ? "👑 超级管理员（AI 锐评免限）"
+      : "🛡 管理员（AI 锐评免限）"
+    : user.vipActive
+      ? `👑 VIP 会员（有效期至 ${escapeHtml(user.vipExpireAt || "长期")}）`
+      : "🆓 免费用户";
+
+  const quotaLabel = user.roastUnlimited
+    ? "♾ 无限次（管理员/VIP 免限）"
+    : `<b>${user.quota}</b> 次`;
+
+  const text = [
+    `👤 <b>个人中心</b>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `🆔 <b>用户 ID：</b><code>${user.tgId}</code>`,
+    `🏷 <b>昵称：</b>${escapeHtml(user.nickname || "未设置")}`,
+    `📛 <b>用户名：</b>${user.username ? `@${escapeHtml(user.username)}` : "未设置"}`,
+    `👑 <b>会员状态：</b>${vipLabel}`,
+    `📅 <b>注册时间：</b>${escapeHtml(user.createdAt || "-")}`,
+    `⚡ <b>剩余锐评次数：</b>${quotaLabel}`,
+    `🤝 <b>已成功邀请：</b><b>${user.inviteCount}</b> 人`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `🔗 <b>你的专属邀请链接：</b>`,
+    `<code>${escapeHtml(inviteLink)}</code>`,
+    `<i>（好友通过链接首次启动机器人，新用户得 3 次，你立得 +1 次；每日 00:00 签到可再领 +1 次）</i>`,
+  ].join("\n");
+
+  const keyboard = new InlineKeyboard()
+    .text("📅 每日签到 (+1次)", "u:checkin")
+    .text("🎟 兑换卡密", "u:redeem_prompt")
+    .row()
+    .text("🔄 刷新个人中心", "u:me");
+
+  return { text, keyboard };
+}
+
+function buildAdminDashboardView(admin: AdminMeDto): {
+  text: string;
+  keyboard: InlineKeyboard;
+} {
+  const isSuper = admin.role === "super_admin";
+  const hasPerm = (p: string) => isSuper || admin.permissions.includes(p);
+
+  const permNames = isSuper
+    ? ["全部 9 项业务权限 + 超管专属特权（AI 锐评无限制）"]
+    : admin.permissions.length > 0
+      ? admin.permissions.map((p) => admin.permissionLabels?.[p] || p)
+      : ["暂无已授权功能（请联系超管勾选）"];
+
+  const text = [
+    isSuper ? `🛠 <b>超级管理员控制台</b>` : `🛠 <b>管理员控制台</b>`,
+    `👤 <b>当前操作人：</b><code>${admin.tgId}</code>${admin.remark ? `（${escapeHtml(admin.remark)}）` : ""}`,
+    `🎖 <b>角色身份：</b>${isSuper ? "超级管理员" : "普通管理员"} · <i>AI 锐评无限制</i>`,
+    `🔑 <b>可用权限：</b>${escapeHtml(permNames.join("、"))}`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `<i>请选择下方功能按钮进行操作（仅展示你已获授权的功能）：</i>`,
+  ].join("\n");
+
+  const kb = new InlineKeyboard();
+  let btnInRow = 0;
+  const pushBtn = (label: string, cb: string) => {
+    if (!isSafeCallbackData(cb)) return;
+    kb.text(label, cb);
+    btnInRow++;
+    if (btnInRow % 2 === 0) {
+      kb.row();
+      btnInRow = 0;
+    }
+  };
+
+  if (hasPerm("user:view")) pushBtn("👤 用户查询", "ad:q_user");
+  if (hasPerm("stats:view")) pushBtn("📊 运营统计", "ad:stats");
+  if (hasPerm("quota:add")) pushBtn("➕ 添加次数", "ad:q_add");
+  if (hasPerm("quota:deduct")) pushBtn("➖ 减少次数", "ad:q_deduct");
+  if (hasPerm("vip:manage")) pushBtn("👑 VIP 管理", "ad:q_vip");
+  if (hasPerm("user:ban")) pushBtn("🚫 封禁管理", "ad:q_ban");
+  if (hasPerm("redeem:create")) pushBtn("🎟 生成卡密", "ad:q_genkey");
+  if (hasPerm("redeem:view")) pushBtn("🔍 查询卡密", "ad:q_viewkey");
+  if (hasPerm("redeem:void")) pushBtn("❌ 作废卡密", "ad:q_voidkey");
+
+  if (isSuper) {
+    if (btnInRow > 0) {
+      kb.row();
+      btnInRow = 0;
+    }
+    kb.text("👥 管理员管理", "ad:admins:1").text("📜 审计日志", "ad:audit:1");
+  }
+
+  return { text, keyboard: kb };
+}
+
+function buildAdminDetailView(
+  target: {
+    tgId: number;
+    remark: string;
+    role: string;
+    permissions: string[];
+    isActive: boolean;
+  },
+  allPermissions: string[],
+  labels: Record<string, string>
+): { text: string; keyboard: InlineKeyboard } {
+  const permListText =
+    target.permissions.length > 0
+      ? target.permissions.map((p) => labels[p] || p).join("、")
+      : "无";
+
+  const text = [
+    `👤 <b>编辑普通管理员</b>`,
+    `🆔 <b>TG ID：</b><code>${target.tgId}</code>`,
+    `🏷 <b>备注：</b>${escapeHtml(target.remark || "未设置")}`,
+    `📌 <b>状态：</b>${target.isActive ? "✅ 已启用（AI 锐评免限）" : "⏸ 已停用"}`,
+    `🔑 <b>已授权：</b>${escapeHtml(permListText)}`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `<i>点击下方权限按钮可实时开启或关闭对应权限：</i>`,
+  ].join("\n");
+
+  const kb = new InlineKeyboard();
+  allPermissions.forEach((perm, idx) => {
+    const enabled = target.permissions.includes(perm);
+    const label = `${enabled ? "✅" : "⬜"} ${labels[perm] || perm}`;
+    const cb = `ad:pt:${target.tgId}:${idx}`;
+    if (isSafeCallbackData(cb)) {
+      kb.text(label, cb);
+      if (idx % 2 === 1) kb.row();
+    }
+  });
+  if (allPermissions.length % 2 === 1) kb.row();
+
+  kb.text(
+    target.isActive ? "⏸ 停用管理员" : "✅ 启用管理员",
+    `ad:tog:${target.tgId}`
+  )
+    .text("🗑 删除管理员", `ad:del:${target.tgId}`)
+    .row()
+    .text("⬅️ 返回管理员列表", "ad:admins:1");
+
+  return { text, keyboard: kb };
+}
+
 // ============================================================================
-// 6. 初始化 grammY Bot 与指令注册（支持一步指令 + 两步 ForceReply）
+// 7. 初始化 grammY Bot 与指令注册
 // ============================================================================
 
 const bot = new Bot(BOT_TOKEN);
 
-type PendingAction = "cn" | "match";
+type PendingAction =
+  | "cn"
+  | "match"
+  | "redeem"
+  | "admin_user"
+  | "admin_quota_add"
+  | "admin_quota_deduct"
+  | "admin_vip"
+  | "admin_ban"
+  | "admin_genkey"
+  | "admin_viewkey"
+  | "admin_voidkey"
+  | "admin_add_admin";
 
 const pendingActions = new Map<
   number,
@@ -3172,6 +3474,16 @@ const pendingActions = new Map<
 const PROMPT_TAGS: Record<PendingAction, string> = {
   cn: "国服战绩总览查询",
   match: "国服近期对局查询",
+  redeem: "兑换卡密",
+  admin_user: "后台查询用户",
+  admin_quota_add: "后台添加次数",
+  admin_quota_deduct: "后台减少次数",
+  admin_vip: "后台 VIP 管理",
+  admin_ban: "后台封禁管理",
+  admin_genkey: "后台生成卡密",
+  admin_viewkey: "后台查询卡密",
+  admin_voidkey: "后台作废卡密",
+  admin_add_admin: "后台添加普通管理员",
 };
 
 function setPendingAction(
@@ -3194,11 +3506,20 @@ function consumePendingAction(userId: number | undefined): PendingAction | null 
   return entry.action;
 }
 
+function parseStartInviterId(rawPayload: string): number | null {
+  const s = String(rawPayload || "").trim();
+  const match = s.match(/^inv_(\d{3,20})$/i);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
 async function executeCnQuery(ctx: Context, rawInput: string): Promise<void> {
   const bnet = rawInput.trim().split(/\s+/)[0];
   if (!bnet) return;
   await ctx.replyWithChatAction("typing");
   try {
+    await ensureUserRecord(ctx);
     const { text, keyboard } = await buildCnOverviewView(bnet, "sport");
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
   } catch (err) {
@@ -3211,6 +3532,7 @@ async function executeMatchQuery(ctx: Context, rawInput: string): Promise<void> 
   if (!bnet) return;
   await ctx.replyWithChatAction("typing");
   try {
+    await ensureUserRecord(ctx);
     const { text, keyboard } = await buildCnMatchListView(bnet, "sport", 1);
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
   } catch (err) {
@@ -3218,20 +3540,369 @@ async function executeMatchQuery(ctx: Context, rawInput: string): Promise<void> 
   }
 }
 
+async function executeRedeemCode(ctx: Context, rawCode: string): Promise<void> {
+  const code = rawCode.trim().split(/\s+/)[0];
+  if (!code) {
+    setPendingAction(ctx.from?.id, "redeem");
+    await ctx.reply(
+      `🎟 <b>${PROMPT_TAGS.redeem}</b>\n请直接发送你的兑换卡密（例如：<code>OW2C-10-A1B2C3D4</code>）：`,
+      {
+        parse_mode: "HTML",
+        reply_markup: { force_reply: true, selective: true },
+      }
+    );
+    return;
+  }
+
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  await ctx.replyWithChatAction("typing");
+  try {
+    const res = await relayInternalRequest("POST", "/internal/user/redeem", {
+      json: { tgId, code, nickname, username },
+    });
+    const d = res.data;
+    const rewardDesc =
+      d.rewardType === "vip_days"
+        ? `👑 VIP 会员 <b>+${d.rewardValue}</b> 天（到期时间：<code>${escapeHtml(d.vipExpireAt || "-")}</code>）`
+        : `⚡ 锐评次数 <b>+${d.rewardValue}</b> 次（当前剩余：<b>${d.quota}</b> 次）`;
+
+    await ctx.reply(
+      `✅ <b>卡密兑换成功！</b>\n🎟 卡密：<code>${escapeHtml(d.code)}</code>\n🎁 获得：${rewardDesc}`,
+      { parse_mode: "HTML" }
+    );
+  } catch (err) {
+    await handleCommandError(ctx, err);
+  }
+}
+
+async function executeCheckin(ctx: Context): Promise<void> {
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  const res = await relayInternalRequest("POST", "/internal/user/checkin", {
+    json: { tgId, nickname, username },
+  });
+  const d = res.data;
+  if (d.alreadyCheckedIn) {
+    await ctx.reply(
+      `📅 你今天（<code>${escapeHtml(d.today)}</code>）已经签过到啦！\n⚡ 当前剩余锐评次数：<b>${d.quota}</b> 次（每日 00:00 刷新）。`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+  await ctx.reply(
+    `✅ <b>每日签到成功！</b>（<code>${escapeHtml(d.today)}</code>）\n🎁 奖励：<b>+${d.rewardQuota}</b> 次锐评机会\n⚡ 当前剩余锐评次数：<b>${d.quota}</b> 次`,
+    { parse_mode: "HTML" }
+  );
+}
+
+async function openUserCenter(ctx: Context, editExisting = false): Promise<void> {
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  const res = await relayInternalRequest("GET", "/internal/user/profile", {
+    params: { tgId, nickname, username },
+  });
+  const user: UserProfileDto = res.data;
+  const { text, keyboard } = buildUserCenterView(ctx, user);
+
+  if (editExisting) {
+    await safeEditMessage(ctx, text, keyboard);
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  }
+}
+
+async function fetchAdminMe(operatorId: number): Promise<AdminMeDto> {
+  const res = await relayInternalRequest("GET", "/internal/admin/me", {
+    operatorId,
+  });
+  return res.data;
+}
+
+async function handlePendingAdminInput(
+  ctx: Context,
+  action: PendingAction,
+  text: string
+): Promise<boolean> {
+  const operatorId = Number(ctx.from?.id || 0);
+  if (!operatorId) return false;
+
+  try {
+    if (action === "admin_user") {
+      const res = await relayInternalRequest("GET", "/internal/admin/user", {
+        params: { query: text },
+        operatorId,
+      });
+      const u: UserProfileDto = res.data.user;
+      const logs: any[] = res.data.recentLogs || [];
+      const logLines =
+        logs.length > 0
+          ? logs
+              .slice(0, 5)
+              .map(
+                (l) =>
+                  `• ${l.changeAmount >= 0 ? `+${l.changeAmount}` : l.changeAmount} (${escapeHtml(l.reason)}) → 余额 ${l.balanceAfter} [${escapeHtml(l.createdAt)}]`
+              )
+          : ["• 暂无流水记录"];
+
+      await ctx.reply(
+        [
+          `👤 <b>用户档案详情</b>`,
+          `🆔 ID：<code>${u.tgId}</code>  |  昵称：${escapeHtml(u.nickname || "-")}  |  用户名：${u.username ? `@${escapeHtml(u.username)}` : "无"}`,
+          `⚡ 剩余次数：<b>${u.quota}</b>  |  VIP：${u.vipActive ? `至 ${escapeHtml(u.vipExpireAt || "")}` : "否"}  |  封禁：${u.isBanned ? "🚫是" : "✅否"}`,
+          `🤝 邀请人数：<b>${u.inviteCount}</b>  |  注册：${escapeHtml(u.createdAt || "-")}`,
+          `━━━━━━━━━━━━━━━━━━`,
+          `<b>📜 近期次数流水</b>`,
+          ...logLines,
+        ].join("\n"),
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+
+    if (action === "admin_quota_add" || action === "admin_quota_deduct") {
+      const parts = text.trim().split(/\s+/);
+      const targetTgId = Number(parts[0]);
+      const amount = Number(parts[1]);
+      const reason = parts.slice(2).join(" ").trim();
+      const endpoint =
+        action === "admin_quota_add"
+          ? "/internal/admin/quota/add"
+          : "/internal/admin/quota/deduct";
+      const res = await relayInternalRequest("POST", endpoint, {
+        operatorId,
+        json: { targetTgId, amount, reason },
+      });
+      const d = res.data;
+      await ctx.reply(
+        action === "admin_quota_add"
+          ? `✅ <b>添加次数成功</b>\n👤 用户：<code>${d.tgId}</code>\n➕ 增加：<b>+${d.added}</b> 次（${d.beforeQuota} → <b>${d.afterQuota}</b>）\n📝 原因：${escapeHtml(d.reason)}`
+          : `✅ <b>减少次数成功</b>\n👤 用户：<code>${d.tgId}</code>\n➖ 扣除：<b>-${d.deducted}</b> 次（${d.beforeQuota} → <b>${d.afterQuota}</b>）\n📝 原因：${escapeHtml(d.reason)}`,
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+
+    if (action === "admin_vip") {
+      const parts = text.trim().split(/\s+/);
+      const targetTgId = Number(parts[0]);
+      const modeArg = (parts[1] || "").toLowerCase();
+      if (modeArg === "revoke" || modeArg === "cancel" || modeArg === "取消") {
+        const reason = parts.slice(2).join(" ").trim() || "取消 VIP";
+        const res = await relayInternalRequest("POST", "/internal/admin/vip", {
+          operatorId,
+          json: { targetTgId, actionType: "revoke", reason },
+        });
+        await ctx.reply(
+          `✅ <b>已取消用户 VIP</b>\n👤 用户：<code>${res.data.tgId}</code>\n📝 原因：${escapeHtml(res.data.reason)}`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        const days = Number(parts[1]);
+        const reason = parts.slice(2).join(" ").trim() || "开通/续期 VIP";
+        const res = await relayInternalRequest("POST", "/internal/admin/vip", {
+          operatorId,
+          json: { targetTgId, actionType: "grant", days, reason },
+        });
+        await ctx.reply(
+          `✅ <b>VIP 开通/续期成功</b>\n👤 用户：<code>${res.data.tgId}</code>\n👑 到期时间：<code>${escapeHtml(res.data.afterVip || "-")}</code>\n📝 原因：${escapeHtml(res.data.reason)}`,
+          { parse_mode: "HTML" }
+        );
+      }
+      return true;
+    }
+
+    if (action === "admin_ban") {
+      const parts = text.trim().split(/\s+/);
+      const targetTgId = Number(parts[0]);
+      const opArg = (parts[1] || "").toLowerCase();
+      const banned = !["0", "false", "unban", "解封"].includes(opArg);
+      const reason = parts.slice(2).join(" ").trim();
+      const res = await relayInternalRequest("POST", "/internal/admin/user/ban", {
+        operatorId,
+        json: { targetTgId, banned, reason },
+      });
+      await ctx.reply(
+        `✅ <b>用户状态已更新</b>\n👤 用户：<code>${res.data.tgId}</code>\n📌 状态：${res.data.isBanned ? "🚫 已封禁" : "✅ 已解封"}\n📝 原因：${escapeHtml(res.data.reason)}`,
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+
+    if (action === "admin_genkey") {
+      const parts = text.trim().split(/\s+/);
+      const rawType = (parts[0] || "quota").toLowerCase();
+      const rewardType =
+        rawType === "vip" || rawType === "vip_days" ? "vip_days" : "quota";
+      const rewardValue = Number(parts[1]);
+      const count = Number(parts[2] || 1);
+      const res = await relayInternalRequest(
+        "POST",
+        "/internal/admin/redeem/create",
+        {
+          operatorId,
+          json: { rewardType, rewardValue, count },
+        }
+      );
+      const codes: string[] = res.data.codes || [];
+      const typeLabel = rewardType === "vip_days" ? "VIP天数" : "锐评次数";
+      await ctx.reply(
+        [
+          `🎟 <b>卡密生成成功（共 ${codes.length} 张）</b>`,
+          `🎁 类型：${typeLabel}  |  面额：<b>${rewardValue}</b>`,
+          `━━━━━━━━━━━━━━━━━━`,
+          ...codes.map((c) => `<code>${escapeHtml(c)}</code>`),
+        ].join("\n"),
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+
+    if (action === "admin_viewkey") {
+      const code = text.trim().split(/\s+/)[0];
+      const res = await relayInternalRequest(
+        "GET",
+        "/internal/admin/redeem/view",
+        {
+          params: { code },
+          operatorId,
+        }
+      );
+      const c = res.data;
+      const statusMap: Record<string, string> = {
+        unused: "🟢 未使用",
+        used: "🔵 已核销",
+        voided: "🔴 已作废",
+      };
+      await ctx.reply(
+        [
+          `🔍 <b>卡密详情</b>`,
+          `🎟 卡密：<code>${escapeHtml(c.code)}</code>`,
+          `🎁 奖励：${c.rewardType === "vip_days" ? `VIP ${c.rewardValue} 天` : `次数 +${c.rewardValue}`}`,
+          `📌 状态：${statusMap[c.status] || c.status}`,
+          c.usedBy
+            ? `👤 核销人：<code>${c.usedBy}</code>（${escapeHtml(c.usedAt || "")}）`
+            : "",
+          c.voidedBy
+            ? `❌ 作废人：<code>${c.voidedBy}</code>（${escapeHtml(c.voidReason || "无原因")} · ${escapeHtml(c.voidedAt || "")}）`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+
+    if (action === "admin_voidkey") {
+      const parts = text.trim().split(/\s+/);
+      const code = parts[0];
+      const reason = parts.slice(1).join(" ").trim();
+      const res = await relayInternalRequest(
+        "POST",
+        "/internal/admin/redeem/void",
+        {
+          operatorId,
+          json: { code, reason },
+        }
+      );
+      await ctx.reply(
+        `✅ <b>卡密已作废</b>\n🎟 卡密：<code>${escapeHtml(res.data.code)}</code>\n📝 原因：${escapeHtml(res.data.voidReason)}`,
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+
+    if (action === "admin_add_admin") {
+      const parts = text.trim().split(/\s+/);
+      const targetTgId = Number(parts[0]);
+      const remark = parts.slice(1).join(" ").trim();
+      const res = await relayInternalRequest("POST", "/internal/admin/admins", {
+        operatorId,
+        json: { targetTgId, remark },
+      });
+      await ctx.reply(
+        `✅ <b>已添加普通管理员（初始 0 权限）</b>\n👤 TG ID：<code>${res.data.tgId}</code>\n🏷 备注：${escapeHtml(res.data.remark)}\n<i>请返回「👥 管理员管理」为其勾选授权。</i>`,
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+  } catch (err) {
+    await handleCommandError(ctx, err);
+    return true;
+  }
+
+  return false;
+}
+
 bot.command(["start", "help"], async (ctx) => {
+  const inviterId = parseStartInviterId(ctx.match.trim());
+  try {
+    const info = await ensureUserRecord(ctx, inviterId);
+    if (info.inviteRewardGranted && info.inviterId) {
+      await ctx.api
+        .sendMessage(
+          info.inviterId,
+          `🎉 <b>邀请奖励到账！</b>\n好友 <code>${info.user.tgId}</code> 通过你的邀请链接首次启动了机器人，你获得了 <b>+${info.inviteRewardQuota}</b> 次锐评机会！`,
+          { parse_mode: "HTML" }
+        )
+        .catch(() => {
+          // 忽略用户未主动会话或屏蔽机器人的通知失败
+        });
+    }
+  } catch (err) {
+    console.error("[/start ensureUserRecord error]", err);
+  }
+
   const helpText = [
     `🇨🇳 <b>欢迎使用《守望先锋 2》国服战绩查询机器人！</b>`,
     ``,
-    `📌 <b>可用指令（支持一步输入，也支持先点指令再发战网 ID）：</b>`,
-    `• <code>/cn 战网ID</code> — 查询国服段位、赛季统计、常用英雄与个人锐评`,
-    `  <i>示例：</i><code>/cn 你的昵称#51234</code>（私聊可直接发战网 ID）`,
-    `• <code>/match 战网ID</code> — 查询国服近期战绩流水与单场对局详情`,
-    `  <i>示例：</i><code>/match 你的昵称#51234</code>`,
+    `📌 <b>战绩查询指令：</b>`,
+    `• <code>/cn 战网ID</code> — 查询国服段位、赛季统计、常用英雄、个人锐评与隐性段位`,
+    `• <code>/match 战网ID</code> — 查询国服近期战绩流水与单场对局详情/锐评`,
     ``,
-    `💡 <b>提示：</b>数据来自网易大神，需输入完整的国服战网 ID（含 <code>#数字</code>）。`,
+    `👤 <b>个人中心与福利：</b>`,
+    `• <code>/me</code> — 查看个人中心、剩余次数、邀请人数与专属邀请链接`,
+    `• <code>/checkin</code> — 每日签到领 <b>+1</b> 次锐评机会（每日 00:00 刷新）`,
+    `• <code>/redeem 卡密</code> — 兑换次数卡密或 VIP 会员卡密`,
+    ``,
+    `💡 <i>新用户注册默认赠送 <b>3</b> 次锐评机会；成功邀请 1 位新用户注册奖励 <b>+1</b> 次。</i>`,
   ].join("\n");
 
   await ctx.reply(helpText, { parse_mode: "HTML" });
+});
+
+bot.command("me", async (ctx) => {
+  try {
+    await openUserCenter(ctx, false);
+  } catch (err) {
+    await handleCommandError(ctx, err);
+  }
+});
+
+bot.command("checkin", async (ctx) => {
+  try {
+    await executeCheckin(ctx);
+  } catch (err) {
+    await handleCommandError(ctx, err);
+  }
+});
+
+bot.command("redeem", async (ctx) => {
+  await executeRedeemCode(ctx, ctx.match.trim());
+});
+
+bot.command("admin", async (ctx) => {
+  if (ctx.chat.type !== "private") {
+    return;
+  }
+  const operatorId = Number(ctx.from?.id || 0);
+  if (!operatorId) return;
+
+  try {
+    const admin = await fetchAdminMe(operatorId);
+    const { text, keyboard } = buildAdminDashboardView(admin);
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  } catch (err) {
+    await handleCommandError(ctx, err);
+  }
 });
 
 bot.command("cn", async (ctx) => {
@@ -3282,8 +3953,14 @@ bot.on("message:text", async (ctx) => {
 
   const replyMsg = ctx.message.reply_to_message;
   if (replyMsg?.from?.is_bot && replyMsg.text) {
-    if (replyMsg.text.includes(PROMPT_TAGS.cn)) action = "cn";
-    else if (replyMsg.text.includes(PROMPT_TAGS.match)) action = "match";
+    for (const [actKey, tag] of Object.entries(PROMPT_TAGS) as Array<
+      [PendingAction, string]
+    >) {
+      if (replyMsg.text.includes(tag)) {
+        action = actKey;
+        break;
+      }
+    }
   }
 
   if (!action && ctx.chat.type === "private") {
@@ -3297,8 +3974,15 @@ bot.on("message:text", async (ctx) => {
 
   if (!action) return;
 
-  if (action === "cn") await executeCnQuery(ctx, text);
-  else if (action === "match") await executeMatchQuery(ctx, text);
+  if (action === "cn") {
+    await executeCnQuery(ctx, text);
+  } else if (action === "match") {
+    await executeMatchQuery(ctx, text);
+  } else if (action === "redeem") {
+    await executeRedeemCode(ctx, text);
+  } else if (action.startsWith("admin_")) {
+    await handlePendingAdminInput(ctx, action, text);
+  }
 });
 
 bot.on("callback_query:data", async (ctx) => {
@@ -3307,6 +3991,325 @@ bot.on("callback_query:data", async (ctx) => {
   const action = parts[0];
 
   try {
+    // --- 用户个人中心回调 ---
+    if (action === "u") {
+      const sub = parts[1];
+      if (sub === "me") {
+        await openUserCenter(ctx, true);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+      if (sub === "checkin") {
+        await safeAnswerCallback(ctx);
+        await executeCheckin(ctx);
+        return;
+      }
+      if (sub === "redeem_prompt") {
+        setPendingAction(ctx.from?.id, "redeem");
+        await safeAnswerCallback(ctx);
+        await ctx.reply(
+          `🎟 <b>${PROMPT_TAGS.redeem}</b>\n请直接发送你的兑换卡密（例如：<code>OW2C-10-A1B2C3D4</code>）：`,
+          {
+            parse_mode: "HTML",
+            reply_markup: { force_reply: true, selective: true },
+          }
+        );
+        return;
+      }
+    }
+
+    // --- 后台管理回调（仅限私聊） ---
+    if (action === "ad") {
+      if (ctx.chat?.type !== "private") {
+        await safeAnswerCallback(ctx, "管理面板仅限私聊使用", true);
+        return;
+      }
+      const operatorId = Number(ctx.from?.id || 0);
+      const sub = parts[1];
+
+      if (sub === "home") {
+        const admin = await fetchAdminMe(operatorId);
+        const { text, keyboard } = buildAdminDashboardView(admin);
+        await safeEditMessage(ctx, text, keyboard);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+
+      const promptMap: Record<string, { act: PendingAction; tip: string }> = {
+        q_user: {
+          act: "admin_user",
+          tip: "请输入要查询的用户 <b>TG 数字 ID</b> 或 <b>@用户名</b>：",
+        },
+        q_add: {
+          act: "admin_quota_add",
+          tip: "请输入格式：<code>用户TG_ID 正整数次数 原因</code>\n例如：<code>123456789 5 活动补偿</code>",
+        },
+        q_deduct: {
+          act: "admin_quota_deduct",
+          tip: "请输入格式：<code>用户TG_ID 正整数次数 原因</code>\n例如：<code>123456789 2 误发回收</code>（剩余次数不可小于 0）",
+        },
+        q_vip: {
+          act: "admin_vip",
+          tip: "开通/续期请输入：<code>用户TG_ID 天数 原因</code>\n取消 VIP 请输入：<code>用户TG_ID revoke 原因</code>",
+        },
+        q_ban: {
+          act: "admin_ban",
+          tip: "封禁请输入：<code>用户TG_ID ban 原因</code>\n解封请输入：<code>用户TG_ID unban 原因</code>",
+        },
+        q_genkey: {
+          act: "admin_genkey",
+          tip: "请输入格式：<code>quota|vip_days 面额数值 [生成数量1-50]</code>\n例如：<code>quota 10 5</code> 或 <code>vip_days 30 3</code>",
+        },
+        q_viewkey: {
+          act: "admin_viewkey",
+          tip: "请输入要查询的<b>卡密编号</b>：",
+        },
+        q_voidkey: {
+          act: "admin_voidkey",
+          tip: "请输入格式：<code>卡密编号 作废原因</code>\n例如：<code>OW2C-10-A1B2C3D4 批次作废</code>",
+        },
+        q_addadmin: {
+          act: "admin_add_admin",
+          tip: "请输入格式：<code>新管理员TG_ID 备注名</code>\n例如：<code>987654321 客服小王</code>（初始为 0 权限）",
+        },
+      };
+
+      if (sub && promptMap[sub]) {
+        const cfg = promptMap[sub];
+        setPendingAction(operatorId, cfg.act);
+        await safeAnswerCallback(ctx);
+        await ctx.reply(`🛠 <b>${PROMPT_TAGS[cfg.act]}</b>\n${cfg.tip}`, {
+          parse_mode: "HTML",
+          reply_markup: { force_reply: true, selective: true },
+        });
+        return;
+      }
+
+      if (sub === "stats") {
+        const res = await relayInternalRequest("GET", "/internal/admin/stats", {
+          operatorId,
+        });
+        const s = res.data;
+        const text = [
+          `📊 <b>运营数据统计（${escapeHtml(s.today)}）</b>`,
+          `━━━━━━━━━━━━━━━━━━`,
+          `👥 累计用户总数：<b>${s.totalUsers}</b>`,
+          `🆕 今日新增注册：<b>${s.todayNewUsers}</b>`,
+          `📅 今日签到人数：<b>${s.todayCheckins}</b>`,
+          `👑 当前有效 VIP：<b>${s.activeVips}</b>`,
+          `🤖 今日 AI 锐评调用：<b>${s.todayPaidRoasts}</b>`,
+          `🎟 未使用卡密库存：<b>${s.unusedRedeemCodes}</b>`,
+        ].join("\n");
+        const kb = new InlineKeyboard().text("⬅️ 返回控制台", "ad:home");
+        await safeEditMessage(ctx, text, kb);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+
+      if (sub === "admins") {
+        const res = await relayInternalRequest(
+          "GET",
+          "/internal/admin/admins",
+          { operatorId }
+        );
+        const list: any[] = res.data.admins || [];
+        const lines = [
+          `👥 <b>管理员列表（仅超管可见）</b>`,
+          `<i>超管不可修改或删除；普通管理员默认 0 权限，点击可编辑。</i>`,
+          `━━━━━━━━━━━━━━━━━━`,
+        ];
+        const kb = new InlineKeyboard();
+        for (const adm of list) {
+          const isSuper = adm.role === "super_admin";
+          lines.push(
+            `• <code>${adm.tgId}</code> — <b>${escapeHtml(adm.remark || "未命名")}</b> [${isSuper ? "超管" : adm.isActive ? "启用" : "停用"}]（权限 ${adm.permissions.length} 项）`
+          );
+          if (!isSuper) {
+            kb.text(
+              `编辑 ${adm.remark || adm.tgId}`,
+              `ad:edit:${adm.tgId}`
+            ).row();
+          }
+        }
+        kb.text("➕ 添加普通管理员", "ad:q_addadmin")
+          .text("⬅️ 返回控制台", "ad:home");
+        await safeEditMessage(ctx, lines.join("\n"), kb);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+
+      if (sub === "edit" && parts[2]) {
+        const targetId = Number(parts[2]);
+        const res = await relayInternalRequest(
+          "GET",
+          "/internal/admin/admins",
+          { operatorId }
+        );
+        const target = (res.data.admins || []).find(
+          (a: any) => Number(a.tgId) === targetId
+        );
+        if (!target) {
+          await safeAnswerCallback(ctx, "管理员不存在", true);
+          return;
+        }
+        const { text, keyboard } = buildAdminDetailView(
+          target,
+          res.data.allPermissions || [],
+          res.data.permissionLabels || {}
+        );
+        await safeEditMessage(ctx, text, keyboard);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+
+      if (sub === "pt" && parts[2] && parts[3] !== undefined) {
+        const targetId = Number(parts[2]);
+        const permIdx = Number(parts[3]);
+        const listRes = await relayInternalRequest(
+          "GET",
+          "/internal/admin/admins",
+          { operatorId }
+        );
+        const allPerms: string[] = listRes.data.allPermissions || [];
+        const permCode = allPerms[permIdx];
+        if (!permCode) {
+          await safeAnswerCallback(ctx, "权限项无效", true);
+          return;
+        }
+        await relayInternalRequest("POST", "/internal/admin/admins/permission", {
+          operatorId,
+          json: { targetTgId: targetId, permCode },
+        });
+        const afterRes = await relayInternalRequest(
+          "GET",
+          "/internal/admin/admins",
+          { operatorId }
+        );
+        const target = (afterRes.data.admins || []).find(
+          (a: any) => Number(a.tgId) === targetId
+        );
+        if (target) {
+          const { text, keyboard } = buildAdminDetailView(
+            target,
+            afterRes.data.allPermissions || [],
+            afterRes.data.permissionLabels || {}
+          );
+          await safeEditMessage(ctx, text, keyboard);
+        }
+        await safeAnswerCallback(ctx, "权限已更新");
+        return;
+      }
+
+      if (sub === "tog" && parts[2]) {
+        const targetId = Number(parts[2]);
+        const listRes = await relayInternalRequest(
+          "GET",
+          "/internal/admin/admins",
+          { operatorId }
+        );
+        const target = (listRes.data.admins || []).find(
+          (a: any) => Number(a.tgId) === targetId
+        );
+        if (!target) {
+          await safeAnswerCallback(ctx, "管理员不存在", true);
+          return;
+        }
+        await relayInternalRequest("POST", "/internal/admin/admins/meta", {
+          operatorId,
+          json: { targetTgId: targetId, isActive: !target.isActive },
+        });
+        const afterRes = await relayInternalRequest(
+          "GET",
+          "/internal/admin/admins",
+          { operatorId }
+        );
+        const updated = (afterRes.data.admins || []).find(
+          (a: any) => Number(a.tgId) === targetId
+        );
+        if (updated) {
+          const { text, keyboard } = buildAdminDetailView(
+            updated,
+            afterRes.data.allPermissions || [],
+            afterRes.data.permissionLabels || {}
+          );
+          await safeEditMessage(ctx, text, keyboard);
+        }
+        await safeAnswerCallback(ctx, "状态已切换");
+        return;
+      }
+
+      if (sub === "del" && parts[2]) {
+        const targetId = Number(parts[2]);
+        await relayInternalRequest("DELETE", "/internal/admin/admins", {
+          operatorId,
+          params: { targetTgId: targetId },
+        });
+        await safeAnswerCallback(ctx, "已删除普通管理员");
+        const listRes = await relayInternalRequest(
+          "GET",
+          "/internal/admin/admins",
+          { operatorId }
+        );
+        const list: any[] = listRes.data.admins || [];
+        const lines = [
+          `👥 <b>管理员列表（仅超管可见）</b>`,
+          `━━━━━━━━━━━━━━━━━━`,
+        ];
+        const kb = new InlineKeyboard();
+        for (const adm of list) {
+          const isSuper = adm.role === "super_admin";
+          lines.push(
+            `• <code>${adm.tgId}</code> — <b>${escapeHtml(adm.remark || "未命名")}</b> [${isSuper ? "超管" : adm.isActive ? "启用" : "停用"}]（权限 ${adm.permissions.length} 项）`
+          );
+          if (!isSuper) {
+            kb.text(
+              `编辑 ${adm.remark || adm.tgId}`,
+              `ad:edit:${adm.tgId}`
+            ).row();
+          }
+        }
+        kb.text("➕ 添加普通管理员", "ad:q_addadmin")
+          .text("⬅️ 返回控制台", "ad:home");
+        await safeEditMessage(ctx, lines.join("\n"), kb);
+        return;
+      }
+
+      if (sub === "audit") {
+        const page = Math.max(1, Number(parts[2]) || 1);
+        const res = await relayInternalRequest(
+          "GET",
+          "/internal/admin/audit-logs",
+          {
+            operatorId,
+            params: { page, pageSize: 6 },
+          }
+        );
+        const d = res.data;
+        const lines = [
+          `📜 <b>操作审计日志（第 ${d.page}/${d.totalPages} 页，共 ${d.total} 条）</b>`,
+          `━━━━━━━━━━━━━━━━━━`,
+        ];
+        for (const item of d.items || []) {
+          lines.push(
+            `• [<code>${escapeHtml(item.createdAt.slice(5, 16))}</code>] 操作者 <code>${item.operatorId}</code>(${escapeHtml(item.operatorRole)}) → <b>${escapeHtml(item.action)}</b> 目标 <code>${escapeHtml(item.targetId || "-")}</code>：${escapeHtml(item.detail || "-")}`
+          );
+        }
+        const kb = new InlineKeyboard();
+        if (d.page > 1) {
+          kb.text("⬅️ 上一页", `ad:audit:${d.page - 1}`);
+        }
+        if (d.page < d.totalPages) {
+          kb.text("下一页 ➡️", `ad:audit:${d.page + 1}`);
+        }
+        if (d.page > 1 || d.page < d.totalPages) kb.row();
+        kb.text("⬅️ 返回控制台", "ad:home");
+        await safeEditMessage(ctx, lines.join("\n"), kb);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+    }
+
+    // --- 战绩总览 / 锐评 / 战绩列表 / 对局详情回调 ---
     if (action === "o" && parts.length >= 3) {
       const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
       const bnet = parts.slice(2).join(":");
@@ -3320,9 +4323,12 @@ bot.on("callback_query:data", async (ctx) => {
       const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
       const bnet = parts.slice(2).join(":");
       const cacheKey = `self:${mode}:${bnet.trim().toLowerCase()}`;
-      await runCachedRoastFlow(ctx, {
+      await runPaidRoastFlow(ctx, {
         cacheKey,
-        ttlMs: ROAST_PROFILE_CACHE_TTL_MS,
+        roastType: "self",
+        quotaReason: "roast_self",
+        gameMode: mode,
+        bnet,
         startToast: "正在呼叫 DeepSeek 锐评你的赛季生涯...",
         loadingHtml: `🪞 正在整理 <b>${escapeHtml(sanitizeSafeText(bnet, "self-loading-bnet"))}</b> 的段位、赛季数据与常用英雄池，生成 DeepSeek 个人锐评中...`,
         errorFallbackHtml: "❌ DeepSeek 个人锐评生成失败，请稍后重试。",
@@ -3335,9 +4341,12 @@ bot.on("callback_query:data", async (ctx) => {
       const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
       const bnet = parts.slice(2).join(":");
       const cacheKey = `mmr:${mode}:${bnet.trim().toLowerCase()}`;
-      await runCachedRoastFlow(ctx, {
+      await runPaidRoastFlow(ctx, {
         cacheKey,
-        ttlMs: ROAST_PROFILE_CACHE_TTL_MS,
+        roastType: "mmr",
+        quotaReason: "roast_mmr",
+        gameMode: mode,
+        bnet,
         startToast: "正在反推你的隐性隐藏分与真实段位...",
         loadingHtml: `🔮 正在综合分析 <b>${escapeHtml(sanitizeSafeText(bnet, "mmr-loading-bnet"))}</b> 的明面段位、胜率背离度、实战效率与近期战绩走势，推演隐性段位中...`,
         errorFallbackHtml: "❌ DeepSeek 隐性段位评估生成失败，请稍后重试。",
@@ -3374,9 +4383,13 @@ bot.on("callback_query:data", async (ctx) => {
         return;
       }
       const cacheKey = `match:${cached.matchId}:${cached.bnet.trim().toLowerCase()}`;
-      await runCachedRoastFlow(ctx, {
+      await runPaidRoastFlow(ctx, {
         cacheKey,
-        ttlMs: ROAST_MATCH_CACHE_TTL_MS,
+        roastType: "match",
+        quotaReason: "roast_match",
+        gameMode: cached.mode,
+        bnet: cached.bnet,
+        matchId: cached.matchId,
         startToast: "正在呼叫 DeepSeek 生成锐评...",
         loadingHtml: `🤖 正在分析 <b>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</b> 的本局数据并生成 DeepSeek 锐评，请稍候...`,
         errorFallbackHtml: "❌ DeepSeek 锐评生成失败，请稍后重试。",
@@ -3395,7 +4408,7 @@ bot.on("callback_query:data", async (ctx) => {
     const msg =
       err instanceof DashenError
         ? err.message.replace(/<[^>]+>/g, "")
-        : "拉取国服数据失败，请稍后重试。";
+        : "操作失败，请稍后重试。";
     await safeAnswerCallback(ctx, msg.slice(0, 180), true);
   }
 });
@@ -3447,7 +4460,7 @@ bot.catch((err) => {
 });
 
 // ============================================================================
-// 7. Vercel Serverless Function 入口
+// 8. Vercel Serverless Function 入口
 // ============================================================================
 
 const handleWebhook = webhookCallback(bot, "http", {
