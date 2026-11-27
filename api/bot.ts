@@ -2265,6 +2265,7 @@ async function runAsyncProfileRoastTask(params: {
   ctx: Context;
   chatId: number;
   messageId: number;
+  taskKey: string;
   rKind: "self" | "mmr";
   bnet: string;
   mode: CnGameMode;
@@ -2278,6 +2279,7 @@ async function runAsyncProfileRoastTask(params: {
     ctx,
     chatId,
     messageId,
+    taskKey,
     rKind,
     bnet,
     mode,
@@ -2324,10 +2326,11 @@ async function runAsyncProfileRoastTask(params: {
       { parse_mode: "HTML" }
     );
   } catch (aiErr) {
+    console.error("[Async Profile Roast Error]", { taskKey, aiErr });
     const errHtml =
       aiErr instanceof DashenError || aiErr instanceof RelayServiceError
         ? aiErr.message
-        : "❌ AI 分析生成失败，请稍后重试。";
+        : "❌ AI 分析生成失败，请稍后再试（未扣减次数）。";
     try {
       await ctx.api.editMessageText(chatId, messageId, errHtml, {
         parse_mode: "HTML",
@@ -2337,7 +2340,24 @@ async function runAsyncProfileRoastTask(params: {
         .sendMessage(chatId, errHtml, { parse_mode: "HTML" })
         .catch(() => {});
     }
+  } finally {
+    inFlightRoastTasks.delete(taskKey);
   }
+}
+
+// 锐评任务并发去重表：key = "<tgId>:<kind>:<target>:<providerId>"
+const inFlightRoastTasks = new Map<string, number>();
+
+function acquireRoastTaskLock(taskKey: string, ttlMs = 90_000): boolean {
+  const now = Date.now();
+  for (const [k, exp] of inFlightRoastTasks.entries()) {
+    if (exp < now) inFlightRoastTasks.delete(k);
+  }
+  if (inFlightRoastTasks.has(taskKey)) {
+    return false;
+  }
+  inFlightRoastTasks.set(taskKey, now + ttlMs);
+  return true;
 }
 
 // 构建多 AI 渠道原地选择键盘（附带取消按钮，点击取消可恢复原按钮栏）
@@ -4569,21 +4589,39 @@ bot.on("callback_query:data", async (ctx) => {
       }
 
       const auth = await authorizeRoastForCtx(ctx);
+      const operatorTgId = Number(ctx.from?.id || 0);
+      const taskKey = `${operatorTgId}:r:${rKind}:${pEntry.bnet.toLowerCase()}:${pEntry.mode}:p${selectedProvider.id}`;
+      if (!acquireRoastTaskLock(taskKey)) {
+        await safeAnswerCallback(
+          ctx,
+          "该锐评任务正在生成中，请勿重复点击，请稍候...",
+          true
+        );
+        return;
+      }
+
       await safeAnswerCallback(
         ctx,
         `已提交 ${selectedProvider.name} 分析，完成后将自动推送结果`
       );
       const operatorNickname = getOperatorDisplayLabel(ctx);
       const titleLabel = rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
-      const loadingMsg = await ctx.reply(
-        `⏳ <b>已受理并开始生成${titleLabel}</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(pEntry.bnet)}</code>\n<i>模型正在分析中，完成后将自动更新本条消息推送结果。</i>`,
-        { parse_mode: "HTML" }
-      );
+      let loadingMsg: any;
+      try {
+        loadingMsg = await ctx.reply(
+          `⏳ <b>已受理并开始生成${titleLabel}</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(pEntry.bnet)}</code>\n<i>模型正在分析中，完成后将自动更新本条消息推送结果。</i>`,
+          { parse_mode: "HTML" }
+        );
+      } catch (replyErr) {
+        inFlightRoastTasks.delete(taskKey);
+        throw replyErr;
+      }
 
       await runAsyncProfileRoastTask({
         ctx,
         chatId: loadingMsg.chat.id,
         messageId: loadingMsg.message_id,
+        taskKey,
         rKind,
         bnet: pEntry.bnet,
         mode: pEntry.mode,
@@ -4649,27 +4687,48 @@ bot.on("callback_query:data", async (ctx) => {
       }
 
       const auth = await authorizeRoastForCtx(ctx);
+      const operatorTgId = Number(ctx.from?.id || 0);
+      const taskKey = `${operatorTgId}:a:${cached.matchId}:${cached.bnet.toLowerCase()}:p${selectedProvider.id}`;
+      if (!acquireRoastTaskLock(taskKey)) {
+        await safeAnswerCallback(
+          ctx,
+          "该单局锐评正在生成中，请勿重复点击，请稍候...",
+          true
+        );
+        return;
+      }
+
       await safeAnswerCallback(
         ctx,
         `已提交 ${selectedProvider.name} 锐评，完成后将自动推送结果`
       );
       const operatorNickname = getOperatorDisplayLabel(ctx);
-      const loadingMsg = await ctx.reply(
-        `⏳ <b>已受理并开始生成单局锐评</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</code>\n<i>模型正在分析对局数据，完成后将自动更新本条消息推送结果。</i>`,
-        { parse_mode: "HTML" }
-      );
+      let loadingMsg: any;
+      try {
+        loadingMsg = await ctx.reply(
+          `⏳ <b>已受理并开始生成单局锐评</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</code>\n<i>模型正在分析对局数据，完成后将自动更新本条消息推送结果。</i>`,
+          { parse_mode: "HTML" }
+        );
+      } catch (replyErr) {
+        inFlightRoastTasks.delete(taskKey);
+        throw replyErr;
+      }
 
-      await runAsyncMatchRoastTask({
-        ctx,
-        chatId: loadingMsg.chat.id,
-        messageId: loadingMsg.message_id,
-        bnet: cached.bnet,
-        customerToken: cached.customerToken,
-        matchId: cached.matchId,
-        operatorNickname,
-        provider: selectedProvider,
-        unlimited: auth.unlimited,
-      });
+      try {
+        await runAsyncMatchRoastTask({
+          ctx,
+          chatId: loadingMsg.chat.id,
+          messageId: loadingMsg.message_id,
+          bnet: cached.bnet,
+          customerToken: cached.customerToken,
+          matchId: cached.matchId,
+          operatorNickname,
+          provider: selectedProvider,
+          unlimited: auth.unlimited,
+        });
+      } finally {
+        inFlightRoastTasks.delete(taskKey);
+      }
       return;
     }
 
