@@ -3,8 +3,8 @@
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
  * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool)
- *         + 腾讯云中转与 MySQL 业务后端 (/internal/*)
- *         + 多 AI 渠道锐评（支持 Vercel 默认 DeepSeek 兜底与超管动态渠道）
+ *         + 腾讯云/Docker 业务中转与异步队列 (/internal/*)
+ *         + 多 AI 渠道锐评（支持 Vercel 默认 执行与 Docker 120s 异步队列回推）
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -39,10 +39,13 @@ const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-// 指向腾讯云 Cloudflare Tunnel 暴露的 HTTPS 域名
+// 指向服务器 Cloudflare Tunnel 暴露的 HTTPS 域名
 const DASHEN_RELAY_ORIGIN =
   process.env.DASHEN_RELAY_ORIGIN?.replace(/\/+$/, "") || "https://ow.eyy8.top";
 const RELAY_SECRET = (process.env.RELAY_SECRET || "").trim();
+const PUBLIC_BOT_ORIGIN = (process.env.PUBLIC_BOT_ORIGIN || "")
+  .replace(/\/+$/, "")
+  .trim();
 
 const DASHEN_API_ROOT =
   process.env.DASHEN_API_ROOT?.replace(/\/+$/, "") ||
@@ -66,14 +69,16 @@ const AI_BASE_URL = (
 ).replace(/\/+$/, "");
 const AI_API_KEY = (process.env.AI_API_KEY || "").trim();
 const AI_MODEL = (process.env.AI_MODEL || "deepseek-chat").trim();
-// 放宽 AI 超时等待上限（默认 55 秒），便于推理/Pro 模型完整完成思考并返回结果
-const AI_TIMEOUT_MS = Math.max(
-  Number(process.env.AI_TIMEOUT_MS || "55000") || 55000,
-  45000
+// 适配 Vercel Hobby 30s 单次函数上限，单次 Vercel 直连 AI 调用控制在 26s 内
+const AI_TIMEOUT_MS = Math.min(
+  Math.max(Number(process.env.AI_TIMEOUT_MS || "26000") || 26000, 10000),
+  26000
 );
+// Docker 队列单任务最长等待 120s
+const DOCKER_AI_TIMEOUT_MS = 120_000;
 
 const API_TIMEOUT_MS = 12_000;
-const RELAY_TIMEOUT_MS = 12_000;
+const RELAY_TIMEOUT_MS = 15_000;
 
 const DEFAULT_REGISTER_QUOTA = 3;
 const CHECKIN_REWARD_QUOTA = 1;
@@ -143,6 +148,7 @@ interface AiProviderDto {
   apiKey?: string;
   maskedKey?: string;
   model: string;
+  executionTarget?: "vercel" | "docker";
   isEnabled: boolean;
 }
 
@@ -624,7 +630,7 @@ function resolveDashenHeroGuid(rawGuid: unknown): string {
 }
 
 // ============================================================================
-// 3. 网易大神与腾讯云内部业务 HTTP 客户端
+// 3. 网易大神与服务器内部业务 HTTP 客户端
 // ============================================================================
 
 class DashenError extends Error {
@@ -939,7 +945,6 @@ async function setRoastCache(params: {
   }
 }
 
-// 拉取当前所有已启用的 AI 锐评渠道（包含开启状态下的 Vercel 默认 DeepSeek 兜底通道）
 async function fetchActiveAiProviders(): Promise<AiProviderDto[]> {
   let customProviders: AiProviderDto[] = [];
   let defaultDeepseekEnabled = true;
@@ -969,6 +974,7 @@ async function fetchActiveAiProviders(): Promise<AiProviderDto[]> {
       apiKey: AI_API_KEY,
       maskedKey: AI_API_KEY ? `${AI_API_KEY.slice(0, 6)}****` : "",
       model: AI_MODEL,
+      executionTarget: "vercel",
       isEnabled: true,
     });
   }
@@ -1111,12 +1117,11 @@ async function authorizeRoastForCtx(ctx: Context): Promise<{
   return res.data;
 }
 
-async function consumeRoastForCtx(
-  ctx: Context,
+async function consumeRoastByTgId(
+  tgId: number,
   roastType: "roast_match" | "roast_self" | "roast_mmr",
   detail: string
 ): Promise<{ consumed: boolean; unlimited: boolean; quota: number }> {
-  const { tgId } = getTgUserMeta(ctx);
   if (!tgId || tgId <= 0) {
     return { consumed: false, unlimited: false, quota: 0 };
   }
@@ -1127,6 +1132,15 @@ async function consumeRoastForCtx(
     json: { tgId, roastType, detail },
   });
   return res.data;
+}
+
+async function consumeRoastForCtx(
+  ctx: Context,
+  roastType: "roast_match" | "roast_self" | "roast_mmr",
+  detail: string
+): Promise<{ consumed: boolean; unlimited: boolean; quota: number }> {
+  const { tgId } = getTgUserMeta(ctx);
+  return consumeRoastByTgId(tgId, roastType, detail);
 }
 
 async function resolveBotUsernameForCtx(ctx: Context): Promise<string> {
@@ -1148,7 +1162,7 @@ async function resolveBotUsernameForCtx(ctx: Context): Promise<string> {
       return fetched;
     }
   } catch {
-    // 忽略获取 Bot 用户名失败，降级使用邀请码
+    // 忽略获取 Bot 用户名失败
   }
   return "";
 }
@@ -1534,7 +1548,7 @@ function parseMatchResultBadge(m: any): string {
 }
 
 // ============================================================================
-// 5.5 多 AI 锐评生成、异步执行与原地按钮切换逻辑
+// 5.5 多 AI 锐评生成、Docker 120s 异步队列入队与回推渲染
 // ============================================================================
 
 function getPlayerRoleHint(heroName: string): string {
@@ -1655,195 +1669,62 @@ function parseAiAnalysisJson(rawText: string): any | null {
   const plain = cleaned.replace(/^#+\s*/gm, "").trim();
   if (plain.length >= 10) {
     return {
-      score: "B",
-      general_summary: plain.slice(0, 120),
-      key_point: plain.slice(120, 260) || "见综合总结",
-      strength: plain.slice(0, 160),
-      flaw: plain.slice(160, 300) || "暂无明显短板摘录",
-      mmr_trend: plain.slice(0, 180),
-      estimated_tier: "当前段位附近",
+      general_summary: plain.slice(0, 260),
+      summary: plain.slice(0, 260),
+      roast: plain.slice(0, 260),
     };
   }
   return null;
 }
 
-// 从 AI 解析结果中兼容提取别名字段，防止空内容回退成“暂无总结”
-function pickAiText(parsed: any, keys: string[]): string {
-  if (!parsed || typeof parsed !== "object") return "";
+function pickAiText(obj: any, keys: string[]): string {
+  if (!obj || typeof obj !== "object") return "";
   for (const k of keys) {
-    const val = parsed[k];
-    if (typeof val === "string" && val.trim()) {
-      return sanitizeSafeText(val, `ai-${k}`).trim();
+    if (obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== "") {
+      return sanitizeSafeText(String(obj[k]).trim(), `ai-field-${k}`);
     }
-    if (Array.isArray(val) && val.length > 0) {
-      const joined = val
-        .map((x) => String(x ?? "").trim())
-        .filter(Boolean)
-        .join("；");
-      if (joined) return sanitizeSafeText(joined, `ai-${k}`).trim();
+  }
+  const lowerMap = new Map<string, any>();
+  for (const [key, val] of Object.entries(obj)) {
+    lowerMap.set(key.toLowerCase(), val);
+  }
+  for (const k of keys) {
+    const val = lowerMap.get(k.toLowerCase());
+    if (val !== undefined && val !== null && String(val).trim() !== "") {
+      return sanitizeSafeText(String(val).trim(), `ai-field-${k}`);
     }
   }
   return "";
 }
 
-// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek），完整等待响应并记录请求体与原始返回日志
-async function callAiProviderJson(
-  systemPrompt: string,
-  userPrompt: string,
-  provider?: AiProviderDto
-): Promise<any | null> {
-  const effectiveBaseUrl = (provider?.baseUrl || AI_BASE_URL).replace(/\/+$/, "");
-  const effectiveApiKey = (provider?.apiKey || AI_API_KEY).trim();
-  const effectiveModel = (provider?.model || AI_MODEL).trim();
-  const providerLabel = escapeHtml(provider?.name || "DeepSeek");
-  const logProviderName = sanitizeSafeText(provider?.name || "DeepSeek", "log-provider");
-
-  if (!effectiveApiKey) {
-    throw new DashenError(
-      400,
-      `⚠️ AI 渠道（${providerLabel}）尚未配置有效的接口密钥（API Key）。`
-    );
+function resolveVercelCallbackUrl(req?: IncomingMessage): string {
+  if (PUBLIC_BOT_ORIGIN) {
+    return `${PUBLIC_BOT_ORIGIN}/api/bot?action=docker_callback`;
   }
-
-  const chatUrl = effectiveBaseUrl.endsWith("/chat/completions")
-    ? effectiveBaseUrl
-    : `${effectiveBaseUrl}/chat/completions`;
-
-  const cleanSys = sanitizeSafeText(systemPrompt, "sys");
-  const cleanUsr = sanitizeSafeText(userPrompt, "usr");
-  const { bodyStr: requestBodyStr, byteLength: requestBodyBytes } =
-    serializeSafeJsonBody({
-      model: effectiveModel,
-      temperature: 0.25,
-      messages: [
-        { role: "system", content: cleanSys },
-        { role: "user", content: cleanUsr },
-      ],
-    });
-
-  // 记录实际发送的请求体摘要与完整 userPrompt（便于直接提取到 Apifox 复现调试）
-  console.info("[AI Provider Request Payload]", {
-    provider: logProviderName,
-    model: effectiveModel,
-    chatUrl,
-    requestBodyBytes,
-    systemPrompt: cleanSys,
-    userPrompt: cleanUsr,
-  });
-
-  let response: Response;
-  try {
-    response = await fetch(chatUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${effectiveApiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: requestBodyStr,
-      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
-    });
-  } catch (err) {
-    const isTimeout =
-      err instanceof Error &&
-      (err.name === "TimeoutError" || err.name === "AbortError");
-    console.error("[AI Provider Fetch Error]", {
-      provider: logProviderName,
-      model: effectiveModel,
-      chatUrl,
-      timeoutMs: AI_TIMEOUT_MS,
-      err,
-    });
-    throw new DashenError(
-      504,
-      isTimeout
-        ? `⏳ ${providerLabel} 思考/生成超时（已等待 ${Math.round(AI_TIMEOUT_MS / 1000)}s），请稍后再试。`
-        : `🌐 请求 ${providerLabel} 接口网络异常，请稍后再试。`
-    );
+  const host = String(
+    req?.headers?.["x-forwarded-host"] || req?.headers?.host || ""
+  )
+    .split(",")[0]
+    .trim();
+  if (host) {
+    const proto = String(req?.headers?.["x-forwarded-proto"] || "https")
+      .split(",")[0]
+      .trim();
+    return `${proto}://${host}/api/bot?action=docker_callback`;
   }
-
-  const rawRespText = await response.text().catch(() => "");
-  if (!response.ok) {
-    console.warn("[AI Provider HTTP Error]", {
-      provider: logProviderName,
-      model: effectiveModel,
-      status: response.status,
-      rawSnippet: sanitizeSafeText(rawRespText, "ai-http-err").slice(0, 600),
-    });
-    throw new DashenError(
-      response.status,
-      `❌ ${providerLabel} 接口调用失败 (HTTP ${response.status})：${escapeHtml(sanitizeSafeText(rawRespText, "ai-error").slice(0, 180))}`
-    );
-  }
-
-  let aiPayload: any = null;
-  try {
-    aiPayload = rawRespText ? JSON.parse(rawRespText) : null;
-  } catch (parseErr) {
-    console.warn("[AI Provider Non-JSON Response]", {
-      provider: logProviderName,
-      model: effectiveModel,
-      parseErr,
-      rawSnippet: sanitizeSafeText(rawRespText, "ai-non-json").slice(0, 800),
-    });
-    return parseAiAnalysisJson(rawRespText);
-  }
-
-  const firstChoice =
-    aiPayload?.choices?.[0] ?? aiPayload?.data?.choices?.[0] ?? null;
-  const msgObj = firstChoice?.message ?? firstChoice?.delta ?? null;
-  const reasoningCandidate =
-    msgObj?.reasoning_content ??
-    msgObj?.reasoning ??
-    msgObj?.thought ??
-    aiPayload?.reasoning_content ??
-    aiPayload?.reasoning ??
-    "";
-  const contentCandidate =
-    msgObj?.content ||
-    aiPayload?.output_text ||
-    aiPayload?.data?.output_text ||
-    aiPayload?.response?.output_text ||
-    firstChoice?.text ||
-    reasoningCandidate ||
-    "";
-  const contentStr =
-    typeof contentCandidate === "string"
-      ? contentCandidate
-      : JSON.stringify(contentCandidate ?? "");
-
-  console.info("[AI Provider Raw Response]", {
-    provider: logProviderName,
-    model: effectiveModel,
-    httpStatus: response.status,
-    finishReason: firstChoice?.finish_reason ?? aiPayload?.finish_reason ?? "",
-    hasContent: Boolean(msgObj?.content),
-    hasReasoningContent: Boolean(reasoningCandidate),
-    contentSnippet: sanitizeSafeText(contentStr, "ai-content-log").slice(0, 600),
-    payloadSnippet: sanitizeSafeText(rawRespText, "ai-payload-log").slice(0, 800),
-  });
-
-  return parseAiAnalysisJson(contentStr);
+  return "";
 }
 
-// 单局锐评：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
-async function generateDeepSeekMatchReview(
+// 构造单局锐评上下文与系统提示词
+async function buildMatchRoastPrompts(
   bnet: string,
   customerToken: string,
-  matchId: string,
-  operatorNickname = "",
-  provider?: AiProviderDto
-): Promise<string> {
-  const pid = Number(provider?.id ?? 0);
-  const pName = String(provider?.name || "DeepSeek").trim() || "DeepSeek";
-  const pModel = String(provider?.model || AI_MODEL).trim();
-
-  const cacheKey = `match:${matchId.trim()}:${bnet.trim().toLowerCase()}:p${pid}`;
-  const cachedHtml = await getRoastCache(cacheKey, "match");
-  if (cachedHtml) {
-    return cachedHtml;
-  }
-
+  matchId: string
+): Promise<{
+  mapName: string;
+  systemPrompt: string;
+  promptContext: string;
+}> {
   const res = await queryMatchInfo(customerToken, matchId);
   const rawDetail = unwrapData(res);
   const detail =
@@ -1942,36 +1823,58 @@ async function generateDeepSeekMatchReview(
     '{ "score": "S/A/B/C/D", "general_summary": "一句话评价", "key_point": "胜负核心点", "mvp_or_scapegoat": "MVP或背锅位及依据", "role_diff": "三路对位简析", "comment": "犀利简评（100字以内）" }',
   ].join("\n");
 
-  const parsed = await callAiProviderJson(systemPrompt, promptContext, provider);
+  return { mapName: safeMapForAi, systemPrompt, promptContext };
+}
+
+function buildProfileSelfSystemPrompt(): string {
+  return [
+    "你是一位犀利、毒舌但不失专业的《守望先锋 2》国服资深教练。",
+    "请根据玩家当前模式的赛季段位、场均数据与常用英雄画像，生成一份个人赛季锐评（24小时内复用）。",
+    "请只输出纯 JSON，格式如下：",
+    '{ "rating": "S/A/B/C/D", "persona": "玩家风格标签", "strength": "核心优势", "flaw": "明显短板", "advice": "针对性提升建议", "roast": "毒舌犀利一句话锐评（100字以内）" }',
+  ].join("\n");
+}
+
+function buildProfileMmrSystemPrompt(): string {
+  return [
+    "你是一位熟悉《守望先锋 2》隐藏分（MMR）与匹配机制的国服数据分析师。",
+    "请根据玩家当前展示的段位、胜率、KDA 与场均输出/治疗/承伤表现，评估其隐性段位水平与上分阻力（24小时内复用）。",
+    "注意：estimated_tier 必须明确写明对应职责（如：单职责写“坦克 钻石 3 - 钻石 1”或“支援 大师 5 - 大师 3”；若多职责均有段位且表现差异明显，可写“坦克 钻石 2 / 输出 钻石 5 / 支援 钻石 4”）。",
+    "请只输出纯 JSON，格式如下：",
+    '{ "estimated_tier": "带职责的预估隐性段位区间", "confidence": "评估置信度", "mmr_trend": "隐藏分走势判断", "key_factor": "决定隐性段位的关键指标", "summary": "综合评估小结（100字以内）" }',
+  ].join("\n");
+}
+
+function formatMatchReviewHtmlFromParsed(params: {
+  parsed: any;
+  bnet: string;
+  mapName: string;
+  providerName: string;
+}): string {
+  const { parsed, bnet, mapName, providerName } = params;
   const rawSummary = pickAiText(parsed, ["general_summary", "summary", "comment"]);
   const rawKeyPoint = pickAiText(parsed, ["key_point", "keyPoint", "role_diff", "comment"]);
   if (!parsed || (!rawSummary && !rawKeyPoint)) {
     throw new DashenError(
       502,
-      `⚠️ ${escapeHtml(pName)} 返回的分析结果为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
+      `⚠️ ${escapeHtml(providerName)} 返回的分析结果为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
     );
   }
 
-  const scoreBadge = escapeHtml(
-    pickAiText(parsed, ["score", "rating"]) || "B"
-  );
+  const scoreBadge = escapeHtml(pickAiText(parsed, ["score", "rating"]) || "B");
   const generalSummary = escapeHtml(rawSummary || "对局分析已生成");
-  const keyPoint = escapeHtml(
-    pickAiText(parsed, ["key_point", "keyPoint"]) || "-"
-  );
+  const keyPoint = escapeHtml(pickAiText(parsed, ["key_point", "keyPoint"]) || "-");
   const mvpOrScapegoat = escapeHtml(
     pickAiText(parsed, ["mvp_or_scapegoat", "mvpOrScapegoat", "mvp"]) || "-"
   );
   const roleDiff = escapeHtml(
     pickAiText(parsed, ["role_diff", "roleDiff", "lane_diff"]) || "-"
   );
-  const comment = escapeHtml(
-    pickAiText(parsed, ["comment", "roast", "advice"]) || ""
-  );
+  const comment = escapeHtml(pickAiText(parsed, ["comment", "roast", "advice"]) || "");
 
-  const reviewHtml = [
-    `🤖 <b>${escapeHtml(pName)} 电竞锐评 — ${escapeHtml(safeMapForAi)}</b>`,
-    `🎯 目标：<code>${escapeHtml(safeBnetForAi)}</code>  |  评级：<b>${scoreBadge}</b>`,
+  return [
+    `🤖 <b>${escapeHtml(providerName)} 电竞锐评 — ${escapeHtml(mapName)}</b>`,
+    `🎯 目标：<code>${escapeHtml(sanitizeSafeText(bnet, "focus-bnet"))}</code>  |  评级：<b>${scoreBadge}</b>`,
     `━━━━━━━━━━━━━━━━━━`,
     `📌 <b>一句话总结：</b>${generalSummary}`,
     `⚡ <b>胜负核心点：</b>${keyPoint}`,
@@ -1981,54 +1884,21 @@ async function generateDeepSeekMatchReview(
   ]
     .filter(Boolean)
     .join("\n");
-
-  await setRoastCache({
-    cacheKey,
-    roastType: "match",
-    bnet,
-    matchId,
-    operatorNickname,
-    providerId: pid,
-    providerName: pName,
-    modelName: pModel,
-    reviewHtml,
-  });
-
-  return reviewHtml;
 }
 
-// 个人赛季锐评：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
-async function generateDeepSeekProfileRoast(
-  bnet: string,
-  mode: CnGameMode,
-  snapshotText: string,
-  operatorNickname = "",
-  provider?: AiProviderDto
-): Promise<string> {
-  const pid = Number(provider?.id ?? 0);
-  const pName = String(provider?.name || "DeepSeek").trim() || "DeepSeek";
-  const pModel = String(provider?.model || AI_MODEL).trim();
-
-  const cacheKey = `self:${mode}:${bnet.trim().toLowerCase()}:p${pid}`;
-  const cachedHtml = await getRoastCache(cacheKey, "self");
-  if (cachedHtml) {
-    return cachedHtml;
-  }
-
-  const systemPrompt = [
-    "你是一位犀利、毒舌但不失专业的《守望先锋 2》国服资深教练。",
-    "请根据玩家当前模式的赛季段位、场均数据与常用英雄画像，生成一份个人赛季锐评（24小时内复用）。",
-    "请只输出纯 JSON，格式如下：",
-    '{ "rating": "S/A/B/C/D", "persona": "玩家风格标签", "strength": "核心优势", "flaw": "明显短板", "advice": "针对性提升建议", "roast": "毒舌犀利一句话锐评（100字以内）" }',
-  ].join("\n");
-
-  const parsed = await callAiProviderJson(systemPrompt, snapshotText, provider);
+function formatProfileSelfReviewHtmlFromParsed(params: {
+  parsed: any;
+  bnet: string;
+  mode: CnGameMode;
+  providerName: string;
+}): string {
+  const { parsed, bnet, mode, providerName } = params;
   const rawStrength = pickAiText(parsed, ["strength", "persona", "roast"]);
   const rawFlaw = pickAiText(parsed, ["flaw", "advice", "roast"]);
   if (!parsed || (!rawStrength && !rawFlaw)) {
     throw new DashenError(
       502,
-      `⚠️ ${escapeHtml(pName)} 返回的赛季锐评为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
+      `⚠️ ${escapeHtml(providerName)} 返回的赛季锐评为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
     );
   }
 
@@ -2046,12 +1916,10 @@ async function generateDeepSeekProfileRoast(
   const advice = escapeHtml(
     pickAiText(parsed, ["advice", "suggestion", "tip"]) || "-"
   );
-  const roast = escapeHtml(
-    pickAiText(parsed, ["roast", "comment"]) || ""
-  );
+  const roast = escapeHtml(pickAiText(parsed, ["roast", "comment"]) || "");
 
-  const reviewHtml = [
-    `🔥 <b>${escapeHtml(pName)} 个人赛季锐评 — <code>${escapeHtml(bnet)}</code></b>`,
+  return [
+    `🔥 <b>${escapeHtml(providerName)} 个人赛季锐评 — <code>${escapeHtml(bnet)}</code></b>`,
     `🏅 综合评级：<b>${ratingBadge}</b>  |  🏷 风格定位：<b>${persona}</b>  |  模式：${mode === "sport" ? "⚔️ 竞技" : "⚡ 快速"}`,
     `━━━━━━━━━━━━━━━━━━`,
     `💪 <b>核心优势：</b>${strength}`,
@@ -2061,26 +1929,8 @@ async function generateDeepSeekProfileRoast(
   ]
     .filter(Boolean)
     .join("\n");
-
-  await setRoastCache({
-    cacheKey,
-    roastType: "self",
-    gameMode: mode,
-    bnet,
-    operatorNickname,
-    providerId: pid,
-    providerName: pName,
-    modelName: pModel,
-    reviewHtml,
-  });
-
-  return reviewHtml;
 }
 
-/**
- * 为隐性段位预估补全职责前缀（如「坦克 钻石 3 - 钻石 1」），
- * 若 AI 返回的区间里已经包含职责名称则避免重复拼接。
- */
 function ensureEstimatedTierHasRole(
   rawTier: string,
   currentRankLabel: string
@@ -2110,40 +1960,19 @@ function ensureEstimatedTierHasRole(
   return `综合职责 ${tier}`;
 }
 
-// 隐性段位评估：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
-async function generateDeepSeekMmrEvaluation(
-  bnet: string,
-  mode: CnGameMode,
-  snapshotText: string,
-  currentRankLabel = "未定级",
-  operatorNickname = "",
-  provider?: AiProviderDto
-): Promise<string> {
-  const pid = Number(provider?.id ?? 0);
-  const pName = String(provider?.name || "DeepSeek").trim() || "DeepSeek";
-  const pModel = String(provider?.model || AI_MODEL).trim();
-
-  const cacheKey = `mmr:${mode}:${bnet.trim().toLowerCase()}:p${pid}`;
-  const cachedHtml = await getRoastCache(cacheKey, "mmr");
-  if (cachedHtml) {
-    return cachedHtml;
-  }
-
-  const systemPrompt = [
-    "你是一位熟悉《守望先锋 2》隐藏分（MMR）与匹配机制的国服数据分析师。",
-    "请根据玩家当前展示的段位、胜率、KDA 与场均输出/治疗/承伤表现，评估其隐性段位水平与上分阻力（24小时内复用）。",
-    "注意：estimated_tier 必须明确写明对应职责（如：单职责写“坦克 钻石 3 - 钻石 1”或“支援 大师 5 - 大师 3”；若多职责均有段位且表现差异明显，可写“坦克 钻石 2 / 输出 钻石 5 / 支援 钻石 4”）。",
-    "请只输出纯 JSON，格式如下：",
-    '{ "estimated_tier": "带职责的预估隐性段位区间", "confidence": "评估置信度", "mmr_trend": "隐藏分走势判断", "key_factor": "决定隐性段位的关键指标", "summary": "综合评估小结（100字以内）" }',
-  ].join("\n");
-
-  const parsed = await callAiProviderJson(systemPrompt, snapshotText, provider);
+function formatProfileMmrReviewHtmlFromParsed(params: {
+  parsed: any;
+  bnet: string;
+  currentRankLabel: string;
+  providerName: string;
+}): string {
+  const { parsed, bnet, currentRankLabel, providerName } = params;
   const rawEstTier = pickAiText(parsed, ["estimated_tier", "estimatedTier", "mmr_tier"]);
   const rawTrend = pickAiText(parsed, ["mmr_trend", "mmrTrend", "trend", "key_factor", "summary"]);
   if (!parsed || (!rawEstTier && !rawTrend)) {
     throw new DashenError(
       502,
-      `⚠️ ${escapeHtml(pName)} 返回的隐性段位评估为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
+      `⚠️ ${escapeHtml(providerName)} 返回的隐性段位评估为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
     );
   }
 
@@ -2169,8 +1998,8 @@ async function generateDeepSeekMmrEvaluation(
     pickAiText(parsed, ["summary", "comment"]) || ""
   );
 
-  const reviewHtml = [
-    `🔮 <b>${escapeHtml(pName)} 隐性段位评估 — <code>${escapeHtml(bnet)}</code></b>`,
+  return [
+    `🔮 <b>${escapeHtml(providerName)} 隐性段位评估 — <code>${escapeHtml(bnet)}</code></b>`,
     `🧭 当前段位【<b>${safeCurrentRank}</b>】->【<b>${estTier}</b>】`,
     `🎯 预估隐性水平：<b>${estTier}</b>  |  置信度：<b>${confidence}</b>`,
     `━━━━━━━━━━━━━━━━━━`,
@@ -2180,29 +2009,361 @@ async function generateDeepSeekMmrEvaluation(
   ]
     .filter(Boolean)
     .join("\n");
-
-  await setRoastCache({
-    cacheKey,
-    roastType: "mmr",
-    gameMode: mode,
-    bnet,
-    operatorNickname,
-    providerId: pid,
-    providerName: pName,
-    modelName: pModel,
-    reviewHtml,
-  });
-
-  return reviewHtml;
 }
 
-// 异步执行单局 AI 锐评并更新状态消息
-async function runAsyncMatchRoastTask(params: {
+// 直接在 Vercel 内同步请求 AI 渠道（用于 executionTarget !== 'docker' 的渠道）
+async function callAiProviderJsonOnVercel(
+  systemPrompt: string,
+  userPrompt: string,
+  provider?: AiProviderDto
+): Promise<any | null> {
+  const effectiveBaseUrl = (provider?.baseUrl || AI_BASE_URL).replace(/\/+$/, "");
+  const effectiveApiKey = (provider?.apiKey || AI_API_KEY).trim();
+  const effectiveModel = (provider?.model || AI_MODEL).trim();
+  const providerLabel = escapeHtml(provider?.name || "DeepSeek");
+  const logProviderName = sanitizeSafeText(provider?.name || "DeepSeek", "log-provider");
+
+  if (!effectiveApiKey) {
+    throw new DashenError(
+      400,
+      `⚠️ AI 渠道（${providerLabel}）尚未配置有效的接口密钥（API Key）。`
+    );
+  }
+
+  const chatUrl = effectiveBaseUrl.endsWith("/chat/completions")
+    ? effectiveBaseUrl
+    : `${effectiveBaseUrl}/chat/completions`;
+
+  const cleanSys = sanitizeSafeText(systemPrompt, "sys");
+  const cleanUsr = sanitizeSafeText(userPrompt, "usr");
+
+  const { bodyStr: requestBodyStr, byteLength: requestBodyBytes } =
+    serializeSafeJsonBody({
+      model: effectiveModel,
+      temperature: 0.25,
+      messages: [
+        { role: "system", content: cleanSys },
+        { role: "user", content: cleanUsr },
+      ],
+    });
+
+  console.info("[AI Provider Request Payload - Vercel]", {
+    provider: logProviderName,
+    model: effectiveModel,
+    chatUrl,
+    requestBodyBytes,
+  });
+
+  let response: Response;
+  try {
+    response = await fetch(chatUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${effectiveApiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: requestBodyStr,
+      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const isTimeout =
+      err instanceof Error &&
+      (err.name === "TimeoutError" || err.name === "AbortError");
+    console.error("[AI Provider Fetch Error - Vercel]", {
+      provider: logProviderName,
+      model: effectiveModel,
+      timeoutMs: AI_TIMEOUT_MS,
+      err,
+    });
+    throw new DashenError(
+      504,
+      isTimeout
+        ? `⏳ ${providerLabel} 思考/生成超时（Vercel 节点上限 ${Math.round(AI_TIMEOUT_MS / 1000)}s），可在超管后台将该渠道切换为 Docker 节点（最长 120s）。`
+        : `🌐 请求 ${providerLabel} 接口网络异常，请稍后再试。`
+    );
+  }
+
+  const rawRespText = await response.text().catch(() => "");
+  if (!response.ok) {
+    throw new DashenError(
+      response.status,
+      `❌ ${providerLabel} 接口调用失败 (HTTP ${response.status})：${escapeHtml(sanitizeSafeText(rawRespText, "ai-error").slice(0, 180))}`
+    );
+  }
+
+  let aiPayload: any = null;
+  try {
+    aiPayload = rawRespText ? JSON.parse(rawRespText) : null;
+  } catch {
+    return parseAiAnalysisJson(rawRespText);
+  }
+
+  const firstChoice =
+    aiPayload?.choices?.[0] ?? aiPayload?.data?.choices?.[0] ?? null;
+  const msgObj = firstChoice?.message ?? firstChoice?.delta ?? null;
+  const reasoningCandidate =
+    msgObj?.reasoning_content ??
+    msgObj?.reasoning ??
+    msgObj?.thought ??
+    aiPayload?.reasoning_content ??
+    aiPayload?.reasoning ??
+    "";
+  const contentCandidate =
+    msgObj?.content ||
+    aiPayload?.output_text ||
+    aiPayload?.data?.output_text ||
+    aiPayload?.response?.output_text ||
+    firstChoice?.text ||
+    reasoningCandidate ||
+    "";
+  const contentStr =
+    typeof contentCandidate === "string"
+      ? contentCandidate
+      : JSON.stringify(contentCandidate ?? "");
+
+  return parseAiAnalysisJson(contentStr);
+}
+
+// ============================================================================
+// 5.6 Docker 异步 AI 队列提交与结果回推处理（严格由 Vercel 推送 Telegram）
+// ============================================================================
+
+interface DockerCallbackMeta {
+  chatId: number;
+  messageId: number;
+  operatorTgId: number;
+  operatorNickname: string;
+  taskKey: string;
+  roastType: RoastType;
+  bnet: string;
+  mode?: CnGameMode;
+  matchId?: string;
+  mapName?: string;
+  currentRankLabel?: string;
+  cacheKey: string;
+  providerId: number;
+  providerName: string;
+  modelName: string;
+  unlimited: boolean;
+}
+
+async function enqueueToDockerAiQueue(params: {
+  provider: AiProviderDto;
+  systemPrompt: string;
+  userPrompt: string;
+  callbackUrl: string;
+  meta: DockerCallbackMeta;
+}): Promise<{
+  jobId: string;
+  aheadCount: number;
+  runningCount: number;
+  queuedCount: number;
+  maxConcurrency: number;
+  timeoutMs: number;
+}> {
+  const { provider, systemPrompt, userPrompt, callbackUrl, meta } = params;
+  const effectiveBaseUrl = (provider.baseUrl || AI_BASE_URL).replace(/\/+$/, "");
+  const effectiveApiKey = (provider.apiKey || AI_API_KEY).trim();
+  const effectiveModel = (provider.model || AI_MODEL).trim();
+
+  if (!effectiveApiKey) {
+    throw new DashenError(
+      400,
+      `⚠️ AI 渠道（${escapeHtml(provider.name)}）尚未配置有效的接口密钥（API Key）。`
+    );
+  }
+  if (!callbackUrl) {
+    throw new DashenError(
+      500,
+      "⚠️ 无法识别当前 Vercel 回推地址，请在环境变量中配置 <code>PUBLIC_BOT_ORIGIN</code>（如 <code>https://owcntg.vercel.app</code>）。"
+    );
+  }
+
+  const res = await relayInternalRequest<{
+    ok: boolean;
+    data: {
+      jobId: string;
+      aheadCount: number;
+      runningCount: number;
+      queuedCount: number;
+      maxConcurrency: number;
+      timeoutMs: number;
+    };
+  }>("POST", "/internal/ai/queue/enqueue", {
+    json: {
+      baseUrl: effectiveBaseUrl,
+      apiKey: effectiveApiKey,
+      model: effectiveModel,
+      systemPrompt: sanitizeSafeText(systemPrompt, "docker-sys"),
+      userPrompt: sanitizeSafeText(userPrompt, "docker-usr"),
+      timeoutMs: DOCKER_AI_TIMEOUT_MS,
+      callbackUrl,
+      meta,
+    },
+  });
+
+  return res.data;
+}
+
+/** 处理 Docker 异步队列完成推理后回推给 Vercel 的结果，统一写缓存、扣次并编辑 TG 消息 */
+async function handleDockerQueueCallback(body: any): Promise<{ ok: boolean }> {
+  const status = String(body?.status || "");
+  const meta: DockerCallbackMeta | undefined = body?.meta;
+  if (!meta || !meta.chatId || !meta.messageId) {
+    console.warn("[Docker Callback Missing Meta]", body);
+    return { ok: false };
+  }
+
+  const {
+    chatId,
+    messageId,
+    operatorTgId,
+    operatorNickname,
+    taskKey,
+    roastType,
+    bnet,
+    mode,
+    matchId,
+    mapName,
+    currentRankLabel,
+    cacheKey,
+    providerId,
+    providerName,
+    modelName,
+    unlimited,
+  } = meta;
+
+  try {
+    if (status !== "succeeded") {
+      const rawErr = String(
+        body?.error || `❌ ${providerName} 在 Docker 队列中执行失败，请稍后重试（未扣减次数）。`
+      );
+      const errHtml = rawErr.startsWith("⏳") || rawErr.startsWith("❌") || rawErr.startsWith("⚠️")
+        ? rawErr
+        : `❌ ${escapeHtml(rawErr)}（未扣减次数）`;
+
+      try {
+        await bot.api.editMessageText(chatId, messageId, errHtml, {
+          parse_mode: "HTML",
+        });
+      } catch {
+        await bot.api
+          .sendMessage(chatId, errHtml, { parse_mode: "HTML" })
+          .catch(() => {});
+      }
+      return { ok: true };
+    }
+
+    const rawContent = String(
+      body?.result?.content ?? body?.result?.rawSnippet ?? ""
+    );
+    const parsed = parseAiAnalysisJson(rawContent);
+
+    let reviewHtml = "";
+    if (roastType === "match") {
+      reviewHtml = formatMatchReviewHtmlFromParsed({
+        parsed,
+        bnet,
+        mapName: mapName || "未知地图",
+        providerName,
+      });
+    } else if (roastType === "mmr") {
+      reviewHtml = formatProfileMmrReviewHtmlFromParsed({
+        parsed,
+        bnet,
+        currentRankLabel: currentRankLabel || "未定级",
+        providerName,
+      });
+    } else {
+      reviewHtml = formatProfileSelfReviewHtmlFromParsed({
+        parsed,
+        bnet,
+        mode: mode === "leisure" ? "leisure" : "sport",
+        providerName,
+      });
+    }
+
+    await setRoastCache({
+      cacheKey,
+      roastType,
+      gameMode: mode || "",
+      bnet,
+      matchId: matchId || "",
+      operatorNickname: operatorNickname || "",
+      providerId: Number(providerId || 0),
+      providerName,
+      modelName,
+      reviewHtml,
+    });
+
+    const consumeType =
+      roastType === "match"
+        ? "roast_match"
+        : roastType === "mmr"
+          ? "roast_mmr"
+          : "roast_self";
+    const titleLabel =
+      roastType === "match"
+        ? `单局锐评(${providerName}):${matchId || ""}:${bnet}`
+        : `${roastType === "mmr" ? "隐性段位评估" : "个人赛季锐评"}(${providerName}):${bnet}`;
+
+    const consumeRes = await consumeRoastByTgId(
+      Number(operatorTgId),
+      consumeType,
+      titleLabel
+    );
+    const quotaFooter =
+      unlimited || consumeRes.unlimited
+        ? `\n\n⚡ <i>管理员/VIP 免限，未扣减次数</i>`
+        : `\n\n⚡ <i>本次已消耗 1 次锐评额度，剩余 <b>${consumeRes.quota}</b> 次</i>`;
+
+    const finalMsg = `${reviewHtml}${quotaFooter}`;
+    try {
+      await bot.api.editMessageText(chatId, messageId, finalMsg, {
+        parse_mode: "HTML",
+      });
+    } catch {
+      await bot.api
+        .sendMessage(chatId, finalMsg, { parse_mode: "HTML" })
+        .catch(() => {});
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error("[Handle Docker Callback Error]", { taskKey, err });
+    const fallbackErr =
+      err instanceof DashenError || err instanceof RelayServiceError
+        ? err.message
+        : `⚠️ ${escapeHtml(providerName)} 结果解析失败，请稍后重试（未扣减次数且未缓存空结果）。`;
+    try {
+      await bot.api.editMessageText(chatId, messageId, fallbackErr, {
+        parse_mode: "HTML",
+      });
+    } catch {
+      await bot.api
+        .sendMessage(chatId, fallbackErr, { parse_mode: "HTML" })
+        .catch(() => {});
+    }
+    return { ok: true };
+  } finally {
+    if (taskKey) {
+      inFlightRoastTasks.delete(taskKey);
+    }
+  }
+}
+
+// ============================================================================
+// 5.7 Vercel 侧直连锐评任务执行（executionTarget === 'vercel'）
+// ============================================================================
+
+async function runVercelMatchRoastTask(params: {
   ctx: Context;
   chatId: number;
   messageId: number;
   bnet: string;
-  customerToken: string;
+  mapName: string;
+  systemPrompt: string;
+  promptContext: string;
   matchId: string;
   operatorNickname: string;
   provider: AiProviderDto;
@@ -2213,24 +2374,48 @@ async function runAsyncMatchRoastTask(params: {
     chatId,
     messageId,
     bnet,
-    customerToken,
+    mapName,
+    systemPrompt,
+    promptContext,
     matchId,
     operatorNickname,
     provider,
     unlimited,
   } = params;
+  const pid = Number(provider.id ?? 0);
+  const pName = String(provider.name || "DeepSeek").trim() || "DeepSeek";
+  const pModel = String(provider.model || AI_MODEL).trim();
+  const cacheKey = `match:${matchId.trim()}:${bnet.trim().toLowerCase()}:p${pid}`;
+
   try {
-    const reviewText = await generateDeepSeekMatchReview(
-      bnet,
-      customerToken,
-      matchId,
-      operatorNickname,
+    const parsed = await callAiProviderJsonOnVercel(
+      systemPrompt,
+      promptContext,
       provider
     );
+    const reviewText = formatMatchReviewHtmlFromParsed({
+      parsed,
+      bnet,
+      mapName,
+      providerName: pName,
+    });
+
+    await setRoastCache({
+      cacheKey,
+      roastType: "match",
+      bnet,
+      matchId,
+      operatorNickname,
+      providerId: pid,
+      providerName: pName,
+      modelName: pModel,
+      reviewHtml: reviewText,
+    });
+
     const consumeRes = await consumeRoastForCtx(
       ctx,
       "roast_match",
-      `单局锐评(${provider.name}):${matchId}:${bnet}`
+      `单局锐评(${pName}):${matchId}:${bnet}`
     );
     const quotaFooter =
       unlimited || consumeRes.unlimited
@@ -2244,10 +2429,11 @@ async function runAsyncMatchRoastTask(params: {
       { parse_mode: "HTML" }
     );
   } catch (aiErr) {
+    console.error("[Async Match Roast Error - Vercel]", { matchId, aiErr });
     const errHtml =
       aiErr instanceof DashenError || aiErr instanceof RelayServiceError
         ? aiErr.message
-        : "❌ AI 锐评生成失败，请稍后重试。";
+        : "❌ AI 锐评生成失败，请稍后重试（未扣减次数）。";
     try {
       await ctx.api.editMessageText(chatId, messageId, errHtml, {
         parse_mode: "HTML",
@@ -2260,12 +2446,10 @@ async function runAsyncMatchRoastTask(params: {
   }
 }
 
-// 异步执行个人赛季锐评 / 隐性段位评估并更新状态消息
-async function runAsyncProfileRoastTask(params: {
+async function runVercelProfileRoastTask(params: {
   ctx: Context;
   chatId: number;
   messageId: number;
-  taskKey: string;
   rKind: "self" | "mmr";
   bnet: string;
   mode: CnGameMode;
@@ -2279,7 +2463,6 @@ async function runAsyncProfileRoastTask(params: {
     ctx,
     chatId,
     messageId,
-    taskKey,
     rKind,
     bnet,
     mode,
@@ -2289,30 +2472,53 @@ async function runAsyncProfileRoastTask(params: {
     provider,
     unlimited,
   } = params;
+  const pid = Number(provider.id ?? 0);
+  const pName = String(provider.name || "DeepSeek").trim() || "DeepSeek";
+  const pModel = String(provider.model || AI_MODEL).trim();
   const titleLabel = rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
+  const cacheKey = `${rKind}:${mode}:${bnet.trim().toLowerCase()}:p${pid}`;
+
   try {
+    const systemPrompt =
+      rKind === "mmr"
+        ? buildProfileMmrSystemPrompt()
+        : buildProfileSelfSystemPrompt();
+    const parsed = await callAiProviderJsonOnVercel(
+      systemPrompt,
+      snapshotText,
+      provider
+    );
     const reviewHtml =
       rKind === "mmr"
-        ? await generateDeepSeekMmrEvaluation(
+        ? formatProfileMmrReviewHtmlFromParsed({
+            parsed,
             bnet,
-            mode,
-            snapshotText,
             currentRankLabel,
-            operatorNickname,
-            provider
-          )
-        : await generateDeepSeekProfileRoast(
+            providerName: pName,
+          })
+        : formatProfileSelfReviewHtmlFromParsed({
+            parsed,
             bnet,
             mode,
-            snapshotText,
-            operatorNickname,
-            provider
-          );
+            providerName: pName,
+          });
+
+    await setRoastCache({
+      cacheKey,
+      roastType: rKind,
+      gameMode: mode,
+      bnet,
+      operatorNickname,
+      providerId: pid,
+      providerName: pName,
+      modelName: pModel,
+      reviewHtml,
+    });
 
     const consumeRes = await consumeRoastForCtx(
       ctx,
       rKind === "mmr" ? "roast_mmr" : "roast_self",
-      `${titleLabel}(${provider.name}):${bnet}`
+      `${titleLabel}(${pName}):${bnet}`
     );
     const quotaFooter =
       unlimited || consumeRes.unlimited
@@ -2326,7 +2532,7 @@ async function runAsyncProfileRoastTask(params: {
       { parse_mode: "HTML" }
     );
   } catch (aiErr) {
-    console.error("[Async Profile Roast Error]", { taskKey, aiErr });
+    console.error("[Async Profile Roast Error - Vercel]", { rKind, bnet, aiErr });
     const errHtml =
       aiErr instanceof DashenError || aiErr instanceof RelayServiceError
         ? aiErr.message
@@ -2340,15 +2546,13 @@ async function runAsyncProfileRoastTask(params: {
         .sendMessage(chatId, errHtml, { parse_mode: "HTML" })
         .catch(() => {});
     }
-  } finally {
-    inFlightRoastTasks.delete(taskKey);
   }
 }
 
-// 锐评任务并发去重表：key = "<tgId>:<kind>:<target>:<providerId>"
+// 锐评任务并发去重表（Docker 队列最长 120s，锁 TTL 设为 135s）
 const inFlightRoastTasks = new Map<string, number>();
 
-function acquireRoastTaskLock(taskKey: string, ttlMs = 90_000): boolean {
+function acquireRoastTaskLock(taskKey: string, ttlMs = 135_000): boolean {
   const now = Date.now();
   for (const [k, exp] of inFlightRoastTasks.entries()) {
     if (exp < now) inFlightRoastTasks.delete(k);
@@ -2360,7 +2564,6 @@ function acquireRoastTaskLock(taskKey: string, ttlMs = 90_000): boolean {
   return true;
 }
 
-// 构建多 AI 渠道原地选择键盘（附带取消按钮，点击取消可恢复原按钮栏）
 function buildProviderSelectKeyboard(
   providers: AiProviderDto[],
   buildOptionCb: (providerId: number) => string,
@@ -2411,7 +2614,6 @@ const profileContextCache = new Map<
   }
 >();
 
-/** 缓存单局详情引用，记录来源页码以便返回战绩列表时精准回到原页 */
 function cacheMatchRef(
   bnet: string,
   customerToken: string,
@@ -3170,7 +3372,6 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   const returnPage = Math.max(1, Number(entry.page) || 1);
   const backListCb = `m:${mCode}:${returnPage}:${entry.bnet}`;
   const backHomeCb = `o:${mCode}:${entry.bnet}`;
-  // 单局详情页锐评按钮：仅 1 个渠道启用时直接显示 "<渠道name> 锐评"，启用 >=2 个时显示 "🤖 AI 锐评" 供点击选择
   const activeProviders = await fetchActiveAiProviders();
   if (activeProviders.length === 1) {
     const single = activeProviders[0];
@@ -3323,9 +3524,9 @@ function buildSuperAiProvidersView(data: {
 
   const lines = [
     `🤖 <b>AI 锐评渠道管理（超管专属）</b>`,
-    `📌 当前已开启渠道数：<b>${enabledCount}</b> 个（开启 ≥ 2 个时用户锐评可原地选择模型；仅 1 个时直接显示对应模型锐评）`,
+    `📌 当前已开启渠道数：<b>${enabledCount}</b> 个（默认执行节点：<code>vercel</code>，可随时切为 <code>docker</code> 异步队列 120s 长时思考）`,
     `━━━━━━━━━━━━━━━━━━`,
-    `• <b>[默认兜底] DeepSeek</b>：${dsOn ? "🟢 已开启" : AI_API_KEY ? "⏸ 已关闭" : "⚠️ 未配置环境变量 AI_API_KEY"}  |  模型 <code>${escapeHtml(AI_MODEL)}</code>`,
+    `• <b>[默认兜底] DeepSeek</b>：${dsOn ? "🟢 已开启" : AI_API_KEY ? "⏸ 已关闭" : "⚠️ 未配置环境变量 AI_API_KEY"}  |  模型 <code>${escapeHtml(AI_MODEL)}</code>  |  节点 <code>⚡ Vercel</code>`,
   ];
 
   const kb = new InlineKeyboard();
@@ -3340,15 +3541,23 @@ function buildSuperAiProvidersView(data: {
     lines.push(`• <i>暂未额外添加其他 AI 渠道，点击下方按钮可新增。</i>`);
   } else {
     for (const p of customList) {
+      const targetCode = p.executionTarget === "docker" ? "docker" : "vercel";
+      const targetBadge =
+        targetCode === "docker" ? "🐳 Docker(120s队列)" : "⚡ Vercel";
+      const nextTarget = targetCode === "docker" ? "vercel" : "docker";
       lines.push(
-        `• <b>#${p.id} ${escapeHtml(p.name)}</b>：${p.isEnabled ? "🟢 已开启" : "⏸ 已关闭"}  |  模型 <code>${escapeHtml(p.model)}</code>  |  密钥 <code>${escapeHtml(p.maskedKey || "****")}</code>`
+        `• <b>#${p.id} ${escapeHtml(p.name)}</b>：${p.isEnabled ? "🟢 已开启" : "⏸ 已关闭"}  |  模型 <code>${escapeHtml(p.model)}</code>  |  节点 <code>${targetBadge}</code>  |  密钥 <code>${escapeHtml(p.maskedKey || "****")}</code>`
       );
       kb.text(
         `${p.isEnabled ? "⏸ 关闭" : "▶️ 开启"} ${p.name}`,
         `ad:ai_tog:${p.id}`
       )
-        .text(`🗑 删除 ${p.name}`, `ad:ai_del:${p.id}`)
+        .text(
+          `🔁 切为 ${nextTarget === "docker" ? "Docker" : "Vercel"}`,
+          `ad:ai_tgt:${p.id}:${nextTarget}`
+        )
         .row();
+      kb.text(`🗑 删除 ${p.name}`, `ad:ai_del:${p.id}`).row();
     }
   }
 
@@ -3406,7 +3615,6 @@ function buildSuperSettingsView(settings: SystemSettingsDto): {
   return { text: lines, keyboard: kb };
 }
 
-// 向目标用户私聊推送「权益已生效」通知（异常隔离，失败不影响已生效的权益）
 async function notifyUserBenefitActivated(
   ctx: Context,
   targetTgId: number,
@@ -3781,17 +3989,21 @@ async function handlePendingAdminInput(
     if (state.action === "super_ai_provider_add") {
       if (parts.length < 4) {
         await ctx.reply(
-          "⚠️ 格式错误，请按空格分隔输入 4 项参数：\n<code>渠道名称 接口地址 接口密钥 模型标识</code>\n例如：\n<code>GPT-4o https://api.openai.com/v1 sk-xxxxxxxx gpt-4o-mini</code>",
+          "⚠️ 格式错误，请按空格分隔输入 4~5 项参数（第 5 项节点可选 <code>vercel</code> 或 <code>docker</code>，默认 <code>vercel</code>）：\n<code>渠道名称 接口地址 接口密钥 模型标识 [vercel|docker]</code>\n例如：\n<code>DeepSeek-Pro https://api.deepseek.com sk-xxx deepseek-v4-pro docker</code>",
           { parse_mode: "HTML" }
         );
         return;
       }
-      const [name, baseUrl, apiKey, model] = parts;
+      const [name, baseUrl, apiKey, model, rawTarget] = parts;
+      const executionTarget =
+        String(rawTarget || "vercel").trim().toLowerCase() === "docker"
+          ? "docker"
+          : "vercel";
       const createdRes = await relayInternalRequest<{
         ok: boolean;
         data: AiProviderDto;
       }>("POST", "/internal/admin/ai-providers", {
-        json: { name, baseUrl, apiKey, model, isEnabled: true },
+        json: { name, baseUrl, apiKey, model, executionTarget, isEnabled: true },
         operatorId,
       });
       const listRes = await relayInternalRequest<{
@@ -3802,7 +4014,7 @@ async function handlePendingAdminInput(
         listRes.data
       );
       await ctx.reply(
-        `✅ 已成功添加并开启 AI 渠道 <b>${escapeHtml(createdRes.data.name)}</b>（模型 <code>${escapeHtml(createdRes.data.model)}</code>）：\n\n${listText}`,
+        `✅ 已成功添加并开启 AI 渠道 <b>${escapeHtml(createdRes.data.name)}</b>（模型 <code>${escapeHtml(createdRes.data.model)}</code>，节点 <code>${executionTarget}</code>）：\n\n${listText}`,
         { parse_mode: "HTML", reply_markup: listKb }
       );
       return;
@@ -4408,6 +4620,9 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
+// 记录当前 HTTP 请求来源域名（用于拼接 Docker 回推 Vercel 的 URL）
+let latestPublicBotOrigin = PUBLIC_BOT_ORIGIN;
+
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   const parts = data.split(":");
@@ -4509,7 +4724,7 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // 取消多 AI 渠道原地展开，恢复原战绩总览或单局详情按钮栏
+    // --- 取消多 AI 渠道原地展开 ---
     if (action === "x" && parts.length >= 3) {
       await assertBotNotMaintenance(ctx);
       if (parts[1] === "p" && parts[2]) {
@@ -4590,26 +4805,52 @@ bot.on("callback_query:data", async (ctx) => {
 
       const auth = await authorizeRoastForCtx(ctx);
       const operatorTgId = Number(ctx.from?.id || 0);
+      const operatorNickname = getOperatorDisplayLabel(ctx);
+      const titleLabel = rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
+      const cacheKey = `${rKind}:${pEntry.mode}:${pEntry.bnet.trim().toLowerCase()}:p${selectedProvider.id}`;
+
+      // 1) 优先命中 24 小时缓存（直接秒回，无需进入队列或等待）
+      const cachedHtml = await getRoastCache(cacheKey, rKind);
+      if (cachedHtml) {
+        const consumeRes = await consumeRoastForCtx(
+          ctx,
+          rKind === "mmr" ? "roast_mmr" : "roast_self",
+          `${titleLabel}(${selectedProvider.name}):${pEntry.bnet}`
+        );
+        const quotaFooter =
+          auth.unlimited || consumeRes.unlimited
+            ? `\n\n⚡ <i>管理员/VIP 免限，未扣减次数</i>`
+            : `\n\n⚡ <i>本次已消耗 1 次锐评额度，剩余 <b>${consumeRes.quota}</b> 次</i>`;
+        await safeAnswerCallback(ctx, "命中 24 小时分析缓存");
+        await ctx.reply(`${cachedHtml}${quotaFooter}`, { parse_mode: "HTML" });
+        return;
+      }
+
+      // 2) 并发去重锁
       const taskKey = `${operatorTgId}:r:${rKind}:${pEntry.bnet.toLowerCase()}:${pEntry.mode}:p${selectedProvider.id}`;
       if (!acquireRoastTaskLock(taskKey)) {
         await safeAnswerCallback(
           ctx,
-          "该锐评任务正在生成中，请勿重复点击，请稍候...",
+          "该锐评任务正在生成或排队中，请勿重复点击...",
           true
         );
         return;
       }
 
+      const isDockerTarget = selectedProvider.executionTarget === "docker";
       await safeAnswerCallback(
         ctx,
-        `已提交 ${selectedProvider.name} 分析，完成后将自动推送结果`
+        isDockerTarget
+          ? `已提交至 Docker 长时队列（最长 120s），完成后自动推送结果`
+          : `已提交 ${selectedProvider.name} 分析，完成后将自动推送结果`
       );
-      const operatorNickname = getOperatorDisplayLabel(ctx);
-      const titleLabel = rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
+
       let loadingMsg: any;
       try {
         loadingMsg = await ctx.reply(
-          `⏳ <b>已受理并开始生成${titleLabel}</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(pEntry.bnet)}</code>\n<i>模型正在分析中，完成后将自动更新本条消息推送结果。</i>`,
+          isDockerTarget
+            ? `⏳ <b>已受理并正在加入 Docker 异步队列</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>（🐳 Docker 节点）\n🎯 目标战网：<code>${escapeHtml(pEntry.bnet)}</code>\n<i>正在获取当前排队位置...</i>`
+            : `⏳ <b>已受理并开始生成${titleLabel}</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>（⚡ Vercel 节点）\n🎯 目标战网：<code>${escapeHtml(pEntry.bnet)}</code>\n<i>模型正在分析中，完成后将自动更新本条消息推送结果。</i>`,
           { parse_mode: "HTML" }
         );
       } catch (replyErr) {
@@ -4617,20 +4858,83 @@ bot.on("callback_query:data", async (ctx) => {
         throw replyErr;
       }
 
-      await runAsyncProfileRoastTask({
-        ctx,
-        chatId: loadingMsg.chat.id,
-        messageId: loadingMsg.message_id,
-        taskKey,
-        rKind,
-        bnet: pEntry.bnet,
-        mode: pEntry.mode,
-        snapshotText: pEntry.snapshotText,
-        currentRankLabel: pEntry.currentRankLabel,
-        operatorNickname,
-        provider: selectedProvider,
-        unlimited: auth.unlimited,
-      });
+      if (isDockerTarget) {
+        try {
+          const callbackUrl = latestPublicBotOrigin
+            ? `${latestPublicBotOrigin}/api/bot?action=docker_callback`
+            : "";
+          const systemPrompt =
+            rKind === "mmr"
+              ? buildProfileMmrSystemPrompt()
+              : buildProfileSelfSystemPrompt();
+
+          const qInfo = await enqueueToDockerAiQueue({
+            provider: selectedProvider,
+            systemPrompt,
+            userPrompt: pEntry.snapshotText,
+            callbackUrl,
+            meta: {
+              chatId: loadingMsg.chat.id,
+              messageId: loadingMsg.message_id,
+              operatorTgId,
+              operatorNickname,
+              taskKey,
+              roastType: rKind,
+              bnet: pEntry.bnet,
+              mode: pEntry.mode,
+              currentRankLabel: pEntry.currentRankLabel,
+              cacheKey,
+              providerId: Number(selectedProvider.id ?? 0),
+              providerName: selectedProvider.name,
+              modelName: selectedProvider.model,
+              unlimited: auth.unlimited,
+            },
+          });
+
+          const waitLine =
+            qInfo.aheadCount > 0
+              ? `📍 当前前方还有 <b>${qInfo.aheadCount}</b> 人/任务在等待（并发 ${qInfo.maxConcurrency}）`
+              : `🚀 当前前方无人排队，已开始深度思考`;
+          await ctx.api
+            .editMessageText(
+              loadingMsg.chat.id,
+              loadingMsg.message_id,
+              `⏳ <b>已进入 Docker 计算队列（${titleLabel}）</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(pEntry.bnet)}</code>\n${waitLine}\n<i>⏱ 单次最长等待 120s，完成后将自动更新本条消息推送结果。</i>`,
+              { parse_mode: "HTML" }
+            )
+            .catch(() => {});
+        } catch (enqErr) {
+          inFlightRoastTasks.delete(taskKey);
+          const errHtml =
+            enqErr instanceof DashenError || enqErr instanceof RelayServiceError
+              ? enqErr.message
+              : "❌ 提交 Docker 队列失败，请稍后重试（未扣减次数）。";
+          await ctx.api
+            .editMessageText(loadingMsg.chat.id, loadingMsg.message_id, errHtml, {
+              parse_mode: "HTML",
+            })
+            .catch(() => {});
+        }
+        return;
+      }
+
+      try {
+        await runVercelProfileRoastTask({
+          ctx,
+          chatId: loadingMsg.chat.id,
+          messageId: loadingMsg.message_id,
+          rKind,
+          bnet: pEntry.bnet,
+          mode: pEntry.mode,
+          snapshotText: pEntry.snapshotText,
+          currentRankLabel: pEntry.currentRankLabel,
+          operatorNickname,
+          provider: selectedProvider,
+          unlimited: auth.unlimited,
+        });
+      } finally {
+        inFlightRoastTasks.delete(taskKey);
+      }
       return;
     }
 
@@ -4688,25 +4992,51 @@ bot.on("callback_query:data", async (ctx) => {
 
       const auth = await authorizeRoastForCtx(ctx);
       const operatorTgId = Number(ctx.from?.id || 0);
+      const operatorNickname = getOperatorDisplayLabel(ctx);
+      const cacheKey = `match:${cached.matchId.trim()}:${cached.bnet.trim().toLowerCase()}:p${selectedProvider.id}`;
+
+      // 1) 优先命中单局永久缓存
+      const cachedHtml = await getRoastCache(cacheKey, "match");
+      if (cachedHtml) {
+        const consumeRes = await consumeRoastForCtx(
+          ctx,
+          "roast_match",
+          `单局锐评(${selectedProvider.name}):${cached.matchId}:${cached.bnet}`
+        );
+        const quotaFooter =
+          auth.unlimited || consumeRes.unlimited
+            ? `\n\n⚡ <i>管理员/VIP 免限，未扣减次数</i>`
+            : `\n\n⚡ <i>本次已消耗 1 次锐评额度，剩余 <b>${consumeRes.quota}</b> 次</i>`;
+        await safeAnswerCallback(ctx, "命中单局锐评缓存");
+        await ctx.reply(`${cachedHtml}${quotaFooter}`, { parse_mode: "HTML" });
+        return;
+      }
+
+      // 2) 并发去重锁
       const taskKey = `${operatorTgId}:a:${cached.matchId}:${cached.bnet.toLowerCase()}:p${selectedProvider.id}`;
       if (!acquireRoastTaskLock(taskKey)) {
         await safeAnswerCallback(
           ctx,
-          "该单局锐评正在生成中，请勿重复点击，请稍候...",
+          "该单局锐评正在生成或排队中，请勿重复点击...",
           true
         );
         return;
       }
 
+      const isDockerTarget = selectedProvider.executionTarget === "docker";
       await safeAnswerCallback(
         ctx,
-        `已提交 ${selectedProvider.name} 锐评，完成后将自动推送结果`
+        isDockerTarget
+          ? `已提交至 Docker 长时队列（最长 120s），完成后自动推送结果`
+          : `已提交 ${selectedProvider.name} 锐评，完成后将自动推送结果`
       );
-      const operatorNickname = getOperatorDisplayLabel(ctx);
+
       let loadingMsg: any;
       try {
         loadingMsg = await ctx.reply(
-          `⏳ <b>已受理并开始生成单局锐评</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</code>\n<i>模型正在分析对局数据，完成后将自动更新本条消息推送结果。</i>`,
+          isDockerTarget
+            ? `⏳ <b>已受理并正在加入 Docker 异步队列（单局锐评）</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>（🐳 Docker 节点）\n🎯 目标战网：<code>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</code>\n<i>正在拉取对局数据并加入计算队列...</i>`
+            : `⏳ <b>已受理并开始生成单局锐评</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>（⚡ Vercel 节点）\n🎯 目标战网：<code>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</code>\n<i>模型正在分析对局数据，完成后将自动更新本条消息推送结果。</i>`,
           { parse_mode: "HTML" }
         );
       } catch (replyErr) {
@@ -4715,19 +5045,82 @@ bot.on("callback_query:data", async (ctx) => {
       }
 
       try {
-        await runAsyncMatchRoastTask({
+        const { mapName, systemPrompt, promptContext } =
+          await buildMatchRoastPrompts(
+            cached.bnet,
+            cached.customerToken,
+            cached.matchId
+          );
+
+        if (isDockerTarget) {
+          const callbackUrl = latestPublicBotOrigin
+            ? `${latestPublicBotOrigin}/api/bot?action=docker_callback`
+            : "";
+          const qInfo = await enqueueToDockerAiQueue({
+            provider: selectedProvider,
+            systemPrompt,
+            userPrompt: promptContext,
+            callbackUrl,
+            meta: {
+              chatId: loadingMsg.chat.id,
+              messageId: loadingMsg.message_id,
+              operatorTgId,
+              operatorNickname,
+              taskKey,
+              roastType: "match",
+              bnet: cached.bnet,
+              matchId: cached.matchId,
+              mapName,
+              cacheKey,
+              providerId: Number(selectedProvider.id ?? 0),
+              providerName: selectedProvider.name,
+              modelName: selectedProvider.model,
+              unlimited: auth.unlimited,
+            },
+          });
+
+          const waitLine =
+            qInfo.aheadCount > 0
+              ? `📍 当前前方还有 <b>${qInfo.aheadCount}</b> 人/任务在等待（并发 ${qInfo.maxConcurrency}）`
+              : `🚀 当前前方无人排队，已开始深度思考`;
+          await ctx.api
+            .editMessageText(
+              loadingMsg.chat.id,
+              loadingMsg.message_id,
+              `⏳ <b>已进入 Docker 计算队列（单局锐评 · ${escapeHtml(mapName)}）</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</code>\n${waitLine}\n<i>⏱ 单次最长等待 120s，完成后将自动更新本条消息推送结果。</i>`,
+              { parse_mode: "HTML" }
+            )
+            .catch(() => {});
+          return;
+        }
+
+        await runVercelMatchRoastTask({
           ctx,
           chatId: loadingMsg.chat.id,
           messageId: loadingMsg.message_id,
           bnet: cached.bnet,
-          customerToken: cached.customerToken,
+          mapName,
+          systemPrompt,
+          promptContext,
           matchId: cached.matchId,
           operatorNickname,
           provider: selectedProvider,
           unlimited: auth.unlimited,
         });
+      } catch (err) {
+        const errHtml =
+          err instanceof DashenError || err instanceof RelayServiceError
+            ? err.message
+            : "❌ 单局锐评处理失败，请稍后重试（未扣减次数）。";
+        await ctx.api
+          .editMessageText(loadingMsg.chat.id, loadingMsg.message_id, errHtml, {
+            parse_mode: "HTML",
+          })
+          .catch(() => {});
       } finally {
-        inFlightRoastTasks.delete(taskKey);
+        if (!isDockerTarget) {
+          inFlightRoastTasks.delete(taskKey);
+        }
       }
       return;
     }
@@ -5160,9 +5553,26 @@ bot.on("callback_query:data", async (ctx) => {
         setPendingAdminInput(operatorId, "super_ai_provider_add");
         await safeAnswerCallback(ctx);
         await ctx.reply(
-          `🛠 <b>${ADMIN_PROMPT_TAGS.super_ai_provider_add}</b>\n请按空格分隔发送以下 4 项配置：\n<code>渠道名称 接口地址 接口密钥 模型标识</code>\n\n示例：\n<code>GPT-4o https://api.openai.com/v1 sk-xxxxxxxx gpt-4o-mini</code>`,
+          `🛠 <b>${ADMIN_PROMPT_TAGS.super_ai_provider_add}</b>\n请按空格分隔发送配置（第 5 项节点默认 <code>vercel</code>，可填 <code>docker</code>）：\n<code>渠道名称 接口地址 接口密钥 模型标识 [vercel|docker]</code>\n\n示例：\n<code>DeepSeek-Pro https://api.deepseek.com sk-xxxxxxxx deepseek-v4-pro docker</code>`,
           { parse_mode: "HTML", reply_markup: { force_reply: true, selective: true } }
         );
+        return;
+      }
+
+      if (sub === "ai_tgt" && parts[2] && parts[3]) {
+        const providerId = Number(parts[2]);
+        const nextTarget = parts[3] === "docker" ? "docker" : "vercel";
+        await relayInternalRequest("POST", "/internal/admin/ai-providers/target", {
+          json: { providerId, executionTarget: nextTarget },
+          operatorId,
+        });
+        const listRes = await relayInternalRequest<{
+          ok: boolean;
+          data: { defaultDeepseekEnabled: boolean; providers: AiProviderDto[] };
+        }>("GET", "/internal/admin/ai-providers", { operatorId });
+        const { text: aiText, keyboard } = buildSuperAiProvidersView(listRes.data);
+        await safeEditMessage(ctx, aiText, keyboard);
+        await safeAnswerCallback(ctx, `已切换执行节点为 ${nextTarget}`);
         return;
       }
 
@@ -5294,18 +5704,41 @@ bot.catch((err) => {
 });
 
 // ============================================================================
-// 9. Vercel Serverless Function 入口
+// 9. Vercel Serverless Function 入口（含 Docker 异步队列结果回推路由）
 // ============================================================================
+
+async function readIncomingJsonBody(req: IncomingMessage): Promise<any> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  return JSON.parse(raw);
+}
 
 const handleWebhook = webhookCallback(bot, "http", {
   secretToken: WEBHOOK_SECRET,
-  timeoutMilliseconds: 25_000,
+  timeoutMilliseconds: 29_000,
 });
 
 export default async function handler(
   req: IncomingMessage,
   res: ServerResponse
 ): Promise<void> {
+  const resolvedOrigin = resolveVercelCallbackUrl(req).replace(
+    /\/api\/bot\?action=docker_callback$/,
+    ""
+  );
+  if (resolvedOrigin) {
+    latestPublicBotOrigin = resolvedOrigin;
+  }
+
+  const reqUrl = new URL(
+    req.url || "/",
+    `http://${req.headers.host || "localhost"}`
+  );
+
   if (req.method === "GET") {
     res.statusCode = 200;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -5327,5 +5760,42 @@ export default async function handler(
     return;
   }
 
+  // Docker 异步队列推理完成后的内部回推接收入口（服务器不直连 TG，统一交由 Vercel 发 TG）
+  if (reqUrl.searchParams.get("action") === "docker_callback") {
+    if (RELAY_SECRET && req.headers["x-relay-secret"] !== RELAY_SECRET) {
+      res.statusCode = 401;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
+      return;
+    }
+
+    try {
+      const body = await readIncomingJsonBody(req);
+      const result = await handleDockerQueueCallback(body);
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      console.error("[Docker Callback Route Error]", err);
+      res.statusCode = 500;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
+    }
+    return;
+  }
+
   await handleWebhook(req, res);
 }
+```
+
+### 部署与测试说明
+1. **上传部署**：将以上完整代码覆盖 `api/bot.ts` 并部署到 Vercel。
+2. **切换渠道节点**：私聊机器人打开 `/admin` -> `🤖 AI 锐评渠道`，把 `deepseek-v4-pro` 点 **`🔁 切为 Docker`**（默认新增渠道仍为 `vercel`，超管可随时切换）。
+3. **验证链路**：
+   - 用户点击锐评后，Vercel 秒级入队并显示 `⏳ 已进入 Docker 计算队列` 以及 `📍 当前前方还有 X 人/任务在等待`（并发 2、超时 120s）；
+   - Docker 思考完成后自动回推给 Vercel 的 `/api/bot?action=docker_callback`，由 Vercel 完成写缓存、扣次并自动把最终锐评结果编辑更新到原消息中。
