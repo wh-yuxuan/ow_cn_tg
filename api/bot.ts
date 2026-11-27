@@ -4516,8 +4516,9 @@ bot.on("callback_query:data", async (ctx) => {
           lines.push("暂无审计日志记录。");
         } else {
           for (const item of d.items) {
+            const operatorLabel = String(item.operatorNickname || "").trim() || "未知操作人";
             lines.push(
-              `• <code>${escapeHtml(item.createdAt)}</code> | 操作人 <code>${item.operatorId}</code> | <b>${escapeHtml(item.action)}</b> → ${escapeHtml(item.targetId || "-")}${item.detail ? `（${escapeHtml(item.detail)}）` : ""}`
+              `• <code>${escapeHtml(item.createdAt)}</code> | 操作人 <b>${escapeHtml(operatorLabel)}</b> | <b>${escapeHtml(item.action)}</b> → ${escapeHtml(item.targetId || "-")}${item.detail ? `（${escapeHtml(item.detail)}）` : ""}`
             );
           }
         }
