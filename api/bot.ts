@@ -1682,7 +1682,7 @@ function pickAiText(parsed: any, keys: string[]): string {
   return "";
 }
 
-// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek）
+// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek），并记录原始响应日志便于排查
 async function callAiProviderJson(
   systemPrompt: string,
   userPrompt: string,
@@ -1692,6 +1692,7 @@ async function callAiProviderJson(
   const effectiveApiKey = (provider?.apiKey || AI_API_KEY).trim();
   const effectiveModel = (provider?.model || AI_MODEL).trim();
   const providerLabel = escapeHtml(provider?.name || "DeepSeek");
+  const logProviderName = sanitizeSafeText(provider?.name || "DeepSeek", "log-provider");
 
   if (!effectiveApiKey) {
     throw new DashenError(
@@ -1729,7 +1730,12 @@ async function callAiProviderJson(
     const isTimeout =
       err instanceof Error &&
       (err.name === "TimeoutError" || err.name === "AbortError");
-    console.error("[AI Provider Fetch Error]", { provider: provider?.name, err });
+    console.error("[AI Provider Fetch Error]", {
+      provider: logProviderName,
+      model: effectiveModel,
+      chatUrl,
+      err,
+    });
     throw new DashenError(
       504,
       isTimeout
@@ -1738,20 +1744,60 @@ async function callAiProviderJson(
     );
   }
 
+  const rawRespText = await response.text().catch(() => "");
   if (!response.ok) {
-    const errText = await response.text().catch(() => "");
+    console.warn("[AI Provider HTTP Error]", {
+      provider: logProviderName,
+      model: effectiveModel,
+      status: response.status,
+      rawSnippet: sanitizeSafeText(rawRespText, "ai-http-err").slice(0, 600),
+    });
     throw new DashenError(
       response.status,
-      `❌ ${providerLabel} 接口调用失败 (HTTP ${response.status})：${escapeHtml(sanitizeSafeText(errText, "ai-error").slice(0, 180))}`
+      `❌ ${providerLabel} 接口调用失败 (HTTP ${response.status})：${escapeHtml(sanitizeSafeText(rawRespText, "ai-error").slice(0, 180))}`
     );
   }
 
-  const aiPayload: any = await response.json().catch(() => null);
-  const content =
-    aiPayload?.choices?.[0]?.message?.content ??
-    aiPayload?.data?.choices?.[0]?.message?.content ??
+  let aiPayload: any = null;
+  try {
+    aiPayload = rawRespText ? JSON.parse(rawRespText) : null;
+  } catch (parseErr) {
+    console.warn("[AI Provider Non-JSON Response]", {
+      provider: logProviderName,
+      model: effectiveModel,
+      parseErr,
+      rawSnippet: sanitizeSafeText(rawRespText, "ai-non-json").slice(0, 800),
+    });
+    return parseAiAnalysisJson(rawRespText);
+  }
+
+  const firstChoice =
+    aiPayload?.choices?.[0] ?? aiPayload?.data?.choices?.[0] ?? null;
+  const msgObj = firstChoice?.message ?? firstChoice?.delta ?? null;
+  const contentCandidate =
+    msgObj?.content ??
+    aiPayload?.output_text ??
+    aiPayload?.data?.output_text ??
+    firstChoice?.text ??
+    msgObj?.reasoning_content ??
     "";
-  return parseAiAnalysisJson(String(content));
+  const contentStr =
+    typeof contentCandidate === "string"
+      ? contentCandidate
+      : JSON.stringify(contentCandidate ?? "");
+
+  console.info("[AI Provider Raw Response]", {
+    provider: logProviderName,
+    model: effectiveModel,
+    httpStatus: response.status,
+    finishReason: firstChoice?.finish_reason ?? aiPayload?.finish_reason ?? "",
+    hasContent: Boolean(msgObj?.content),
+    hasReasoningContent: Boolean(msgObj?.reasoning_content),
+    contentSnippet: sanitizeSafeText(contentStr, "ai-content-log").slice(0, 600),
+    payloadSnippet: sanitizeSafeText(rawRespText, "ai-payload-log").slice(0, 800),
+  });
+
+  return parseAiAnalysisJson(contentStr);
 }
 
 // 单局锐评：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
