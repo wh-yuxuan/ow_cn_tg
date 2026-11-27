@@ -4,7 +4,7 @@
  * 机器人框架：grammY (Webhook 模式)
  * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool)
  *         + 腾讯云中转与 MySQL 业务后端 (/internal/*)
- *         + DeepSeek AI 锐评
+ *         + 多 AI 渠道锐评（支持 Vercel 默认 DeepSeek 兜底与超管动态渠道）
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -131,7 +131,7 @@ interface AdminMeDto {
   permissionLabels?: Record<string, string>;
 }
 
-// 【新增】AI 锐评渠道结构定义（id = 0 表示 Vercel 环境变量默认 DeepSeek 兜底通道）
+// AI 锐评渠道结构定义（id = 0 表示 Vercel 环境变量默认 DeepSeek 兜底通道）
 interface AiProviderDto {
   id: number;
   name: string;
@@ -935,7 +935,7 @@ async function setRoastCache(params: {
   }
 }
 
-// 【新增】拉取当前所有已启用的 AI 锐评渠道（包含开启状态下的 Vercel 默认 DeepSeek 兜底通道）
+// 拉取当前所有已启用的 AI 锐评渠道（包含开启状态下的 Vercel 默认 DeepSeek 兜底通道）
 async function fetchActiveAiProviders(): Promise<AiProviderDto[]> {
   let customProviders: AiProviderDto[] = [];
   let defaultDeepseekEnabled = true;
@@ -1530,7 +1530,7 @@ function parseMatchResultBadge(m: any): string {
 }
 
 // ============================================================================
-// 5.5 DeepSeek 电竞锐评生成逻辑（单局 / 个人赛季 / 隐性段位评估）
+// 5.5 多 AI 锐评生成、异步执行与原地按钮切换逻辑
 // ============================================================================
 
 function getPlayerRoleHint(heroName: string): string {
@@ -1647,10 +1647,42 @@ function parseAiAnalysisJson(rawText: string): any | null {
       // 继续尝试下一个候选 JSON 片段
     }
   }
+  // 兜底：若模型返回非 JSON 纯文本，提取前 300 字作为摘要/评价返回
+  const plain = cleaned.replace(/^#+\s*/gm, "").trim();
+  if (plain.length >= 10) {
+    return {
+      score: "B",
+      general_summary: plain.slice(0, 120),
+      key_point: plain.slice(120, 260) || "见综合总结",
+      strength: plain.slice(0, 160),
+      flaw: plain.slice(160, 300) || "暂无明显短板摘录",
+      mmr_trend: plain.slice(0, 180),
+      estimated_tier: "当前段位附近",
+    };
+  }
   return null;
 }
 
-// 【修改】支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek）
+// 从 AI 解析结果中兼容提取别名字段，防止空内容回退成“暂无总结”
+function pickAiText(parsed: any, keys: string[]): string {
+  if (!parsed || typeof parsed !== "object") return "";
+  for (const k of keys) {
+    const val = parsed[k];
+    if (typeof val === "string" && val.trim()) {
+      return sanitizeSafeText(val, `ai-${k}`).trim();
+    }
+    if (Array.isArray(val) && val.length > 0) {
+      const joined = val
+        .map((x) => String(x ?? "").trim())
+        .filter(Boolean)
+        .join("；");
+      if (joined) return sanitizeSafeText(joined, `ai-${k}`).trim();
+    }
+  }
+  return "";
+}
+
+// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek）
 async function callAiProviderJson(
   systemPrompt: string,
   userPrompt: string,
@@ -1722,7 +1754,7 @@ async function callAiProviderJson(
   return parseAiAnalysisJson(String(content));
 }
 
-// 【修改】单局锐评：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
+// 单局锐评：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
 async function generateDeepSeekMatchReview(
   bnet: string,
   customerToken: string,
@@ -1839,26 +1871,30 @@ async function generateDeepSeekMatchReview(
   ].join("\n");
 
   const parsed = await callAiProviderJson(systemPrompt, promptContext, provider);
+  const rawSummary = pickAiText(parsed, ["general_summary", "summary", "comment"]);
+  const rawKeyPoint = pickAiText(parsed, ["key_point", "keyPoint", "role_diff", "comment"]);
+  if (!parsed || (!rawSummary && !rawKeyPoint)) {
+    throw new DashenError(
+      502,
+      `⚠️ ${escapeHtml(pName)} 返回的分析结果为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
+    );
+  }
+
   const scoreBadge = escapeHtml(
-    sanitizeSafeText(parsed?.score || "B", "ai-score").trim()
+    pickAiText(parsed, ["score", "rating"]) || "B"
   );
-  const generalSummary = escapeHtml(
-    sanitizeSafeText(parsed?.general_summary || "暂无总结", "ai-summary").trim()
-  );
+  const generalSummary = escapeHtml(rawSummary || "对局分析已生成");
   const keyPoint = escapeHtml(
-    sanitizeSafeText(parsed?.key_point || "-", "ai-key-point").trim()
+    pickAiText(parsed, ["key_point", "keyPoint"]) || "-"
   );
   const mvpOrScapegoat = escapeHtml(
-    sanitizeSafeText(
-      parsed?.mvp_or_scapegoat || "-",
-      "ai-mvp-scapegoat"
-    ).trim()
+    pickAiText(parsed, ["mvp_or_scapegoat", "mvpOrScapegoat", "mvp"]) || "-"
   );
   const roleDiff = escapeHtml(
-    sanitizeSafeText(parsed?.role_diff || "-", "ai-role-diff").trim()
+    pickAiText(parsed, ["role_diff", "roleDiff", "lane_diff"]) || "-"
   );
   const comment = escapeHtml(
-    sanitizeSafeText(parsed?.comment || "", "ai-comment").trim()
+    pickAiText(parsed, ["comment", "roast", "advice"]) || ""
   );
 
   const reviewHtml = [
@@ -1889,7 +1925,7 @@ async function generateDeepSeekMatchReview(
   return reviewHtml;
 }
 
-// 【修改】个人赛季锐评：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
+// 个人赛季锐评：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
 async function generateDeepSeekProfileRoast(
   bnet: string,
   mode: CnGameMode,
@@ -1915,26 +1951,31 @@ async function generateDeepSeekProfileRoast(
   ].join("\n");
 
   const parsed = await callAiProviderJson(systemPrompt, snapshotText, provider);
-  const rawRating = sanitizeSafeText(parsed?.rating || "B", "p-rating")
+  const rawStrength = pickAiText(parsed, ["strength", "persona", "roast"]);
+  const rawFlaw = pickAiText(parsed, ["flaw", "advice", "roast"]);
+  if (!parsed || (!rawStrength && !rawFlaw)) {
+    throw new DashenError(
+      502,
+      `⚠️ ${escapeHtml(pName)} 返回的赛季锐评为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
+    );
+  }
+
+  const rawRating = (pickAiText(parsed, ["rating", "score"]) || "B")
     .trim()
     .toUpperCase();
   const ratingBadge = escapeHtml(
     /^[SABCD]$/.test(rawRating) ? rawRating : rawRating || "B"
   );
   const persona = escapeHtml(
-    sanitizeSafeText(parsed?.persona || "全能路人王", "p-persona").trim()
+    pickAiText(parsed, ["persona", "style", "tag"]) || "全能路人王"
   );
-  const strength = escapeHtml(
-    sanitizeSafeText(parsed?.strength || "-", "p-strength").trim()
-  );
-  const flaw = escapeHtml(
-    sanitizeSafeText(parsed?.flaw || "-", "p-flaw").trim()
-  );
+  const strength = escapeHtml(rawStrength || "-");
+  const flaw = escapeHtml(rawFlaw || "-");
   const advice = escapeHtml(
-    sanitizeSafeText(parsed?.advice || "-", "p-advice").trim()
+    pickAiText(parsed, ["advice", "suggestion", "tip"]) || "-"
   );
   const roast = escapeHtml(
-    sanitizeSafeText(parsed?.roast || "", "p-roast").trim()
+    pickAiText(parsed, ["roast", "comment"]) || ""
   );
 
   const reviewHtml = [
@@ -1997,7 +2038,7 @@ function ensureEstimatedTierHasRole(
   return `综合职责 ${tier}`;
 }
 
-// 【修改】隐性段位评估：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
+// 隐性段位评估：支持指定 AI 渠道、按 :p<providerId> 隔离缓存、标题标注渠道名称
 async function generateDeepSeekMmrEvaluation(
   bnet: string,
   mode: CnGameMode,
@@ -2025,26 +2066,35 @@ async function generateDeepSeekMmrEvaluation(
   ].join("\n");
 
   const parsed = await callAiProviderJson(systemPrompt, snapshotText, provider);
+  const rawEstTier = pickAiText(parsed, ["estimated_tier", "estimatedTier", "mmr_tier"]);
+  const rawTrend = pickAiText(parsed, ["mmr_trend", "mmrTrend", "trend", "key_factor", "summary"]);
+  if (!parsed || (!rawEstTier && !rawTrend)) {
+    throw new DashenError(
+      502,
+      `⚠️ ${escapeHtml(pName)} 返回的隐性段位评估为空或格式无法解析，请稍后再试（未扣减次数且未缓存空结果）。`
+    );
+  }
+
   const safeCurrentRank = escapeHtml(
     sanitizeSafeText(currentRankLabel || "未定级", "m-cur-rank").trim() ||
       "未定级"
   );
   const formattedEstTier = ensureEstimatedTierHasRole(
-    String(parsed?.estimated_tier || "当前段位附近"),
+    rawEstTier || "当前段位附近",
     currentRankLabel
   );
   const estTier = escapeHtml(formattedEstTier);
   const confidence = escapeHtml(
-    sanitizeSafeText(parsed?.confidence || "中等", "m-conf").trim()
+    pickAiText(parsed, ["confidence"]) || "中等"
   );
   const mmrTrend = escapeHtml(
-    sanitizeSafeText(parsed?.mmr_trend || "-", "m-trend").trim()
+    pickAiText(parsed, ["mmr_trend", "mmrTrend", "trend"]) || "-"
   );
   const keyFactor = escapeHtml(
-    sanitizeSafeText(parsed?.key_factor || "-", "m-factor").trim()
+    pickAiText(parsed, ["key_factor", "keyFactor", "factor"]) || "-"
   );
   const summary = escapeHtml(
-    sanitizeSafeText(parsed?.summary || "", "m-summary").trim()
+    pickAiText(parsed, ["summary", "comment"]) || ""
   );
 
   const reviewHtml = [
@@ -2072,6 +2122,173 @@ async function generateDeepSeekMmrEvaluation(
   });
 
   return reviewHtml;
+}
+
+// 异步执行单局 AI 锐评并更新状态消息
+async function runAsyncMatchRoastTask(params: {
+  ctx: Context;
+  chatId: number;
+  messageId: number;
+  bnet: string;
+  customerToken: string;
+  matchId: string;
+  operatorNickname: string;
+  provider: AiProviderDto;
+  unlimited: boolean;
+}): Promise<void> {
+  const {
+    ctx,
+    chatId,
+    messageId,
+    bnet,
+    customerToken,
+    matchId,
+    operatorNickname,
+    provider,
+    unlimited,
+  } = params;
+  try {
+    const reviewText = await generateDeepSeekMatchReview(
+      bnet,
+      customerToken,
+      matchId,
+      operatorNickname,
+      provider
+    );
+    const consumeRes = await consumeRoastForCtx(
+      ctx,
+      "roast_match",
+      `单局锐评(${provider.name}):${matchId}:${bnet}`
+    );
+    const quotaFooter =
+      unlimited || consumeRes.unlimited
+        ? `\n\n⚡ <i>管理员/VIP 免限，未扣减次数</i>`
+        : `\n\n⚡ <i>本次已消耗 1 次锐评额度，剩余 <b>${consumeRes.quota}</b> 次</i>`;
+
+    await ctx.api.editMessageText(
+      chatId,
+      messageId,
+      `${reviewText}${quotaFooter}`,
+      { parse_mode: "HTML" }
+    );
+  } catch (aiErr) {
+    const errHtml =
+      aiErr instanceof DashenError || aiErr instanceof RelayServiceError
+        ? aiErr.message
+        : "❌ AI 锐评生成失败，请稍后重试。";
+    try {
+      await ctx.api.editMessageText(chatId, messageId, errHtml, {
+        parse_mode: "HTML",
+      });
+    } catch {
+      await ctx.api
+        .sendMessage(chatId, errHtml, { parse_mode: "HTML" })
+        .catch(() => {});
+    }
+  }
+}
+
+// 异步执行个人赛季锐评 / 隐性段位评估并更新状态消息
+async function runAsyncProfileRoastTask(params: {
+  ctx: Context;
+  chatId: number;
+  messageId: number;
+  rKind: "self" | "mmr";
+  bnet: string;
+  mode: CnGameMode;
+  snapshotText: string;
+  currentRankLabel: string;
+  operatorNickname: string;
+  provider: AiProviderDto;
+  unlimited: boolean;
+}): Promise<void> {
+  const {
+    ctx,
+    chatId,
+    messageId,
+    rKind,
+    bnet,
+    mode,
+    snapshotText,
+    currentRankLabel,
+    operatorNickname,
+    provider,
+    unlimited,
+  } = params;
+  const titleLabel = rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
+  try {
+    const reviewHtml =
+      rKind === "mmr"
+        ? await generateDeepSeekMmrEvaluation(
+            bnet,
+            mode,
+            snapshotText,
+            currentRankLabel,
+            operatorNickname,
+            provider
+          )
+        : await generateDeepSeekProfileRoast(
+            bnet,
+            mode,
+            snapshotText,
+            operatorNickname,
+            provider
+          );
+
+    const consumeRes = await consumeRoastForCtx(
+      ctx,
+      rKind === "mmr" ? "roast_mmr" : "roast_self",
+      `${titleLabel}(${provider.name}):${bnet}`
+    );
+    const quotaFooter =
+      unlimited || consumeRes.unlimited
+        ? `\n\n⚡ <i>管理员/VIP 免限，未扣减次数</i>`
+        : `\n\n⚡ <i>本次已消耗 1 次锐评额度，剩余 <b>${consumeRes.quota}</b> 次</i>`;
+
+    await ctx.api.editMessageText(
+      chatId,
+      messageId,
+      `${reviewHtml}${quotaFooter}`,
+      { parse_mode: "HTML" }
+    );
+  } catch (aiErr) {
+    const errHtml =
+      aiErr instanceof DashenError || aiErr instanceof RelayServiceError
+        ? aiErr.message
+        : "❌ AI 分析生成失败，请稍后重试。";
+    try {
+      await ctx.api.editMessageText(chatId, messageId, errHtml, {
+        parse_mode: "HTML",
+      });
+    } catch {
+      await ctx.api
+        .sendMessage(chatId, errHtml, { parse_mode: "HTML" })
+        .catch(() => {});
+    }
+  }
+}
+
+// 构建多 AI 渠道原地选择键盘（附带取消按钮，点击取消可恢复原按钮栏）
+function buildProviderSelectKeyboard(
+  providers: AiProviderDto[],
+  buildOptionCb: (providerId: number) => string,
+  cancelCb: string
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  providers.forEach((pv, idx) => {
+    const cbData = buildOptionCb(pv.id);
+    if (isSafeCallbackData(cbData)) {
+      kb.text(`🤖 ${pv.name}`, cbData);
+      if (idx % 2 === 1) kb.row();
+    }
+  });
+  if (providers.length % 2 !== 0) {
+    kb.row();
+  }
+  if (isSafeCallbackData(cancelCb)) {
+    kb.text("⬅️ 取消选择", cancelCb);
+  }
+  return kb;
 }
 
 // ============================================================================
@@ -2861,7 +3078,7 @@ async function buildCnMatchDetailView(refId: string): Promise<{
   const returnPage = Math.max(1, Number(entry.page) || 1);
   const backListCb = `m:${mCode}:${returnPage}:${entry.bnet}`;
   const backHomeCb = `o:${mCode}:${entry.bnet}`;
-  // 【修改】单局详情页锐评按钮：仅 1 个渠道启用时直接显示 "<渠道name> 锐评"，启用 >=2 个时显示 "🤖 AI 锐评" 供点击选择
+  // 单局详情页锐评按钮：仅 1 个渠道启用时直接显示 "<渠道name> 锐评"，启用 >=2 个时显示 "🤖 AI 锐评" 供点击选择
   const activeProviders = await fetchActiveAiProviders();
   if (activeProviders.length === 1) {
     const single = activeProviders[0];
@@ -2904,7 +3121,7 @@ type PendingAdminAction =
   | "super_set_reg_quota"
   | "super_set_inv_quota"
   | "super_set_chk_quota"
-  | "super_ai_provider_add"; // 【新增】超管新增 AI 锐评渠道
+  | "super_ai_provider_add";
 
 interface PendingAdminState {
   action: PendingAdminAction;
@@ -2992,7 +3209,6 @@ function buildAdminDashboardView(admin: AdminMeDto): {
     kb.text("⚙️ 系统与赠送设置", "ad:sys_cfg")
       .text("👥 管理员管理", "ad:a_list")
       .row();
-    // 【修改】超管控制台新增「🤖 AI 锐评渠道」入口，与「📜 审计日志」并排
     kb.text("🤖 AI 锐评渠道", "ad:ai_list")
       .text("📜 审计日志", "ad:logs:1")
       .row();
@@ -3001,7 +3217,6 @@ function buildAdminDashboardView(admin: AdminMeDto): {
   return { text: lines.join("\n"), keyboard: kb };
 }
 
-// 【新增】构建超管「AI 锐评渠道管理」视图（包含默认 DeepSeek 兜底通道 + 所有动态添加渠道）
 function buildSuperAiProvidersView(data: {
   defaultDeepseekEnabled: boolean;
   providers: AiProviderDto[];
@@ -3016,7 +3231,7 @@ function buildSuperAiProvidersView(data: {
 
   const lines = [
     `🤖 <b>AI 锐评渠道管理（超管专属）</b>`,
-    `📌 当前已开启渠道数：<b>${enabledCount}</b> 个（开启 ≥ 2 个时用户锐评可自由选择模型；仅 1 个时直接显示对应模型锐评）`,
+    `📌 当前已开启渠道数：<b>${enabledCount}</b> 个（开启 ≥ 2 个时用户锐评可原地选择模型；仅 1 个时直接显示对应模型锐评）`,
     `━━━━━━━━━━━━━━━━━━`,
     `• <b>[默认兜底] DeepSeek</b>：${dsOn ? "🟢 已开启" : AI_API_KEY ? "⏸ 已关闭" : "⚠️ 未配置环境变量 AI_API_KEY"}  |  模型 <code>${escapeHtml(AI_MODEL)}</code>`,
   ];
@@ -3099,7 +3314,7 @@ function buildSuperSettingsView(settings: SystemSettingsDto): {
   return { text: lines, keyboard: kb };
 }
 
-// 【新增】向目标用户私聊推送「权益已生效」通知（异常隔离，失败不影响已生效的权益）
+// 向目标用户私聊推送「权益已生效」通知（异常隔离，失败不影响已生效的权益）
 async function notifyUserBenefitActivated(
   ctx: Context,
   targetTgId: number,
@@ -3221,7 +3436,6 @@ async function handlePendingAdminInput(
         }
       );
       const d = r.data;
-      // 【修改】替换原有的 admin_quota_add / admin_quota_deduct 回复逻辑：仅在添加次数成功时推送「权益已生效」通知
       if (state.action === "admin_quota_add") {
         const notifyRes = await notifyUserBenefitActivated(
           ctx,
@@ -3279,7 +3493,6 @@ async function handlePendingAdminInput(
         }
       );
       const d = r.data;
-      // 【修改】替换原有的 admin_vip_manage 回复逻辑：仅在开通/续期 VIP 成功时推送「权益已生效」通知
       if (d.mode === "revoke") {
         await ctx.reply(
           `✅ 已取消用户 <code>${d.tgId}</code> 的 VIP 会员（原因：${escapeHtml(d.reason)}）`,
@@ -3473,7 +3686,6 @@ async function handlePendingAdminInput(
       return;
     }
 
-    // 【新增】处理超管提交新增 AI 锐评渠道（格式：渠道名称 接口地址 接口密钥 模型标识）
     if (state.action === "super_ai_provider_add") {
       if (parts.length < 4) {
         await ctx.reply(
@@ -3583,7 +3795,7 @@ const ADMIN_PROMPT_TAGS: Record<PendingAdminAction, string> = {
   super_set_reg_quota: "设置新注册赠送次数",
   super_set_inv_quota: "设置邀请赠送次数",
   super_set_chk_quota: "设置每日签到赠送次数",
-  super_ai_provider_add: "新增 AI 锐评渠道", // 【新增】
+  super_ai_provider_add: "新增 AI 锐评渠道",
 };
 
 function setPendingUserAction(
@@ -3949,7 +4161,6 @@ bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
   if (!text || text.startsWith("/")) return;
 
-  // 处理输入框旁常驻底部快捷按钮点击
   if (text === "👤 个人中心") {
     try {
       await assertBotNotMaintenance(ctx);
@@ -4053,7 +4264,6 @@ bot.on("message:text", async (ctx) => {
   const userId = Number(ctx.from?.id || 0);
   const replyMsg = ctx.message.reply_to_message;
 
-  // 1. 优先匹配后台管理待输入状态
   if (replyMsg?.from?.is_bot && replyMsg.text && ctx.chat.type === "private") {
     const matchedAdminTag = (
       Object.entries(ADMIN_PROMPT_TAGS) as Array<[PendingAdminAction, string]>
@@ -4075,7 +4285,6 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
-  // 2. 普通用户待输入状态（战网查询 / 战绩流水 / 兑换卡密）
   let action: PendingUserAction | null = null;
   if (replyMsg?.from?.is_bot && replyMsg.text) {
     if (replyMsg.text.includes(USER_PROMPT_TAGS.cn)) action = "cn";
@@ -4208,8 +4417,30 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    // 取消多 AI 渠道原地展开，恢复原战绩总览或单局详情按钮栏
+    if (action === "x" && parts.length >= 3) {
+      await assertBotNotMaintenance(ctx);
+      if (parts[1] === "p" && parts[2]) {
+        const pEntry = profileContextCache.get(parts[2]);
+        if (pEntry && Date.now() <= pEntry.expiresAt) {
+          const { text, keyboard } = await buildCnOverviewView(
+            pEntry.bnet,
+            pEntry.mode
+          );
+          await safeEditMessage(ctx, text, keyboard);
+        }
+        await safeAnswerCallback(ctx, "已取消渠道选择");
+        return;
+      }
+      if (parts[1] === "d" && parts[2]) {
+        const { text, keyboard } = await buildCnMatchDetailView(parts[2]);
+        await safeEditMessage(ctx, text, keyboard);
+        await safeAnswerCallback(ctx, "已取消渠道选择");
+        return;
+      }
+    }
+
     // --- 个人赛季锐评 / 隐性段位评估 ---
-    // 【修改】支持 r:<self|mmr>:<pRef>（先检测启用渠道数，>=2 个弹出渠道选择键盘）以及 r:<self|mmr>:<pRef>:<providerId>（指定渠道直接执行）
     if (action === "r" && (parts.length === 3 || parts.length === 4)) {
       await assertBotNotMaintenance(ctx);
       const rKind = parts[1] === "mmr" ? "mmr" : "self";
@@ -4237,15 +4468,17 @@ bot.on("callback_query:data", async (ctx) => {
       let selectedProvider: AiProviderDto | undefined;
       if (parts.length === 3) {
         if (activeProviders.length >= 2) {
-          const selectKb = new InlineKeyboard();
-          activeProviders.forEach((pv, idx) => {
-            selectKb.text(`🤖 ${pv.name}`, `r:${rKind}:${pRef}:${pv.id}`);
-            if (idx % 2 === 1) selectKb.row();
-          });
-          await safeAnswerCallback(ctx);
-          await ctx.reply(
-            `🤖 请选择用于<b>${rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评"}</b>的 AI 模型渠道：`,
-            { parse_mode: "HTML", reply_markup: selectKb }
+          const selectKb = buildProviderSelectKeyboard(
+            activeProviders,
+            (pid) => `r:${rKind}:${pRef}:${pid}`,
+            `x:p:${pRef}`
+          );
+          if (ctx.callbackQuery.message) {
+            await ctx.editMessageReplyMarkup({ reply_markup: selectKb }).catch(() => {});
+          }
+          await safeAnswerCallback(
+            ctx,
+            `请选择${rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评"}渠道`
           );
           return;
         }
@@ -4264,70 +4497,38 @@ bot.on("callback_query:data", async (ctx) => {
       }
 
       const auth = await authorizeRoastForCtx(ctx);
-      await safeAnswerCallback(ctx, `正在使用 ${selectedProvider.name} 生成 AI 分析...`);
+      await safeAnswerCallback(
+        ctx,
+        `已提交 ${selectedProvider.name} 分析，完成后将自动推送结果`
+      );
       const operatorNickname = getOperatorDisplayLabel(ctx);
-      const titleLabel =
-        rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
+      const titleLabel = rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
       const loadingMsg = await ctx.reply(
-        `🤖 正在呼叫 <b>${escapeHtml(selectedProvider.name)}</b> 为 <code>${escapeHtml(pEntry.bnet)}</code> 生成<b>${titleLabel}</b>，请稍候...`,
+        `⏳ <b>已受理并开始生成${titleLabel}</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(pEntry.bnet)}</code>\n<i>模型正在分析中，完成后将自动更新本条消息推送结果。</i>`,
         { parse_mode: "HTML" }
       );
 
-      try {
-        const reviewHtml =
-          rKind === "mmr"
-            ? await generateDeepSeekMmrEvaluation(
-                pEntry.bnet,
-                pEntry.mode,
-                pEntry.snapshotText,
-                pEntry.currentRankLabel,
-                operatorNickname,
-                selectedProvider
-              )
-            : await generateDeepSeekProfileRoast(
-                pEntry.bnet,
-                pEntry.mode,
-                pEntry.snapshotText,
-                operatorNickname,
-                selectedProvider
-              );
-
-        const consumeRes = await consumeRoastForCtx(
-          ctx,
-          rKind === "mmr" ? "roast_mmr" : "roast_self",
-          `${titleLabel}(${selectedProvider.name}):${pEntry.bnet}`
-        );
-        const quotaFooter =
-          auth.unlimited || consumeRes.unlimited
-            ? `\n\n⚡ <i>管理员/VIP 免限，未扣减次数</i>`
-            : `\n\n⚡ <i>本次已消耗 1 次锐评额度，剩余 <b>${consumeRes.quota}</b> 次</i>`;
-
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          `${reviewHtml}${quotaFooter}`,
-          { parse_mode: "HTML" }
-        );
-      } catch (aiErr) {
-        const errHtml =
-          aiErr instanceof DashenError || aiErr instanceof RelayServiceError
-            ? aiErr.message
-            : "❌ AI 分析生成失败，请稍后重试。";
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          errHtml,
-          { parse_mode: "HTML" }
-        );
-      }
+      await runAsyncProfileRoastTask({
+        ctx,
+        chatId: loadingMsg.chat.id,
+        messageId: loadingMsg.message_id,
+        rKind,
+        bnet: pEntry.bnet,
+        mode: pEntry.mode,
+        snapshotText: pEntry.snapshotText,
+        currentRankLabel: pEntry.currentRankLabel,
+        operatorNickname,
+        provider: selectedProvider,
+        unlimited: auth.unlimited,
+      });
       return;
     }
 
     // --- 单局 AI 锐评 ---
-    // 【修改】支持 a:<refId>（>=2 个渠道启用时弹出选择键盘）与 a:<refId>:<providerId>（指定渠道直接执行）
     if (action === "a" && (parts.length === 2 || parts.length === 3)) {
       await assertBotNotMaintenance(ctx);
-      const cached = matchCache.get(parts[1]);
+      const refId = parts[1];
+      const cached = matchCache.get(refId);
       if (!cached || Date.now() > cached.expiresAt) {
         await safeAnswerCallback(
           ctx,
@@ -4350,16 +4551,15 @@ bot.on("callback_query:data", async (ctx) => {
       let selectedProvider: AiProviderDto | undefined;
       if (parts.length === 2) {
         if (activeProviders.length >= 2) {
-          const selectKb = new InlineKeyboard();
-          activeProviders.forEach((pv, idx) => {
-            selectKb.text(`🤖 ${pv.name}`, `a:${parts[1]}:${pv.id}`);
-            if (idx % 2 === 1) selectKb.row();
-          });
-          await safeAnswerCallback(ctx);
-          await ctx.reply(`🤖 请选择用于本局<b>AI 锐评</b>的模型渠道：`, {
-            parse_mode: "HTML",
-            reply_markup: selectKb,
-          });
+          const selectKb = buildProviderSelectKeyboard(
+            activeProviders,
+            (pid) => `a:${refId}:${pid}`,
+            `x:d:${refId}`
+          );
+          if (ctx.callbackQuery.message) {
+            await ctx.editMessageReplyMarkup({ reply_markup: selectKb }).catch(() => {});
+          }
+          await safeAnswerCallback(ctx, "请选择本局 AI 锐评渠道");
           return;
         }
         selectedProvider = activeProviders[0];
@@ -4377,48 +4577,27 @@ bot.on("callback_query:data", async (ctx) => {
       }
 
       const auth = await authorizeRoastForCtx(ctx);
-      await safeAnswerCallback(ctx, `正在呼叫 ${selectedProvider.name} 生成锐评...`);
+      await safeAnswerCallback(
+        ctx,
+        `已提交 ${selectedProvider.name} 锐评，完成后将自动推送结果`
+      );
       const operatorNickname = getOperatorDisplayLabel(ctx);
       const loadingMsg = await ctx.reply(
-        `🤖 正在呼叫 <b>${escapeHtml(selectedProvider.name)}</b> 分析 <b>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</b> 的本局数据并生成锐评，请稍候...`,
+        `⏳ <b>已受理并开始生成单局锐评</b>\n🤖 模型渠道：<b>${escapeHtml(selectedProvider.name)}</b>\n🎯 目标战网：<code>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</code>\n<i>模型正在分析对局数据，完成后将自动更新本条消息推送结果。</i>`,
         { parse_mode: "HTML" }
       );
-      try {
-        const reviewText = await generateDeepSeekMatchReview(
-          cached.bnet,
-          cached.customerToken,
-          cached.matchId,
-          operatorNickname,
-          selectedProvider
-        );
-        const consumeRes = await consumeRoastForCtx(
-          ctx,
-          "roast_match",
-          `单局锐评(${selectedProvider.name}):${cached.matchId}:${cached.bnet}`
-        );
-        const quotaFooter =
-          auth.unlimited || consumeRes.unlimited
-            ? `\n\n⚡ <i>管理员/VIP 免限，未扣减次数</i>`
-            : `\n\n⚡ <i>本次已消耗 1 次锐评额度，剩余 <b>${consumeRes.quota}</b> 次</i>`;
 
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          `${reviewText}${quotaFooter}`,
-          { parse_mode: "HTML" }
-        );
-      } catch (aiErr) {
-        const errHtml =
-          aiErr instanceof DashenError || aiErr instanceof RelayServiceError
-            ? aiErr.message
-            : "❌ AI 锐评生成失败，请稍后重试。";
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          errHtml,
-          { parse_mode: "HTML" }
-        );
-      }
+      await runAsyncMatchRoastTask({
+        ctx,
+        chatId: loadingMsg.chat.id,
+        messageId: loadingMsg.message_id,
+        bnet: cached.bnet,
+        customerToken: cached.customerToken,
+        matchId: cached.matchId,
+        operatorNickname,
+        provider: selectedProvider,
+        unlimited: auth.unlimited,
+      });
       return;
     }
 
@@ -4835,7 +5014,6 @@ bot.on("callback_query:data", async (ctx) => {
         return;
       }
 
-      // 【新增】超管 AI 锐评渠道列表管理
       if (sub === "ai_list") {
         const r = await relayInternalRequest<{
           ok: boolean;
@@ -4847,7 +5025,6 @@ bot.on("callback_query:data", async (ctx) => {
         return;
       }
 
-      // 【新增】超管点击「新增 AI 渠道」提示输入
       if (sub === "ai_add") {
         setPendingAdminInput(operatorId, "super_ai_provider_add");
         await safeAnswerCallback(ctx);
@@ -4858,7 +5035,6 @@ bot.on("callback_query:data", async (ctx) => {
         return;
       }
 
-      // 【新增】超管切换指定 AI 渠道开关（0 表示默认 DeepSeek）
       if (sub === "ai_tog" && parts[2] !== undefined) {
         const providerId = Number(parts[2]);
         const togRes = await relayInternalRequest<{
@@ -4881,7 +5057,6 @@ bot.on("callback_query:data", async (ctx) => {
         return;
       }
 
-      // 【新增】超管删除指定自定义 AI 渠道
       if (sub === "ai_del" && parts[2]) {
         const providerId = Number(parts[2]);
         await relayInternalRequest("DELETE", "/internal/admin/ai-providers", {
