@@ -99,6 +99,18 @@ interface UserProfileDto {
   roastUnlimited: boolean;
 }
 
+interface SystemSettingsDto {
+  botStatus: "normal" | "maintenance";
+  registerRewardEnabled: boolean;
+  registerRewardQuota: number;
+  inviteRewardEnabled: boolean;
+  inviteRewardQuota: number;
+  checkinRewardEnabled: boolean;
+  checkinRewardQuota: number;
+  updatedBy: number | null;
+  updatedAt: string | null;
+}
+
 interface AdminMeDto {
   tgId: number;
   remark: string;
@@ -879,6 +891,7 @@ async function dashenRequest<T = any>(
   options?: {
     params?: Record<string, string | number | undefined>;
     json?: Record<string, any>;
+    userId?: number;
   }
 ): Promise<DashenResponse<T>> {
   ensureDashenCredentials();
@@ -893,6 +906,13 @@ async function dashenRequest<T = any>(
   }
 
   const headers = buildAuthHeaders();
+  if (RELAY_SECRET) {
+    headers["x-relay-secret"] = RELAY_SECRET;
+  }
+  if (options?.userId && options.userId > 0) {
+    headers["x-user-id"] = String(options.userId);
+  }
+
   let body: string | undefined;
   if (method === "POST" && options?.json) {
     headers["Content-Type"] = "application/json";
@@ -919,13 +939,6 @@ async function dashenRequest<T = any>(
     );
   }
 
-  if (response.status === 401 || response.status === 403) {
-    throw new DashenError(
-      response.status,
-      "🔐 网易大神鉴权失败（HTTP 401/403），请检查 <code>DASHEN_TOKEN</code> 是否有效。"
-    );
-  }
-
   const rawText = await response.text().catch(() => "");
   let payload: DashenResponse<T>;
   try {
@@ -938,8 +951,21 @@ async function dashenRequest<T = any>(
   }
 
   if (!response.ok) {
+    if (response.status === 503 && payload?.code === "BOT_MAINTENANCE") {
+      throw new DashenError(
+        503,
+        payload?.error ||
+          "🛠 <b>机器人正在升级维护中</b>\n当前仅对管理员与超级管理员开放调试，普通用户请稍后再试。"
+      );
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new DashenError(
+        response.status,
+        "🔐 网易大神鉴权失败（HTTP 401/403），请检查 <code>DASHEN_TOKEN</code> 是否有效。"
+      );
+    }
     const reason =
-      payload?.msg || payload?.message || `HTTP ${response.status}`;
+      payload?.msg || payload?.message || payload?.error || `HTTP ${response.status}`;
     throw new DashenError(
       response.status,
       `❌ 上游接口错误：${escapeHtml(String(reason))}`
@@ -961,10 +987,14 @@ async function dashenRequest<T = any>(
   return payload;
 }
 
-async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
+async function searchBnetAccount(
+  bnet: string,
+  userId?: number
+): Promise<DashenResponse> {
   const normalized = bnet.replace("＃", "#").trim();
   if (SEARCH_BNET_METHOD === "GET") {
     return dashenRequest("GET", SEARCH_BNET_ACCOUNT_URL, {
+      userId,
       params: {
         token: DASHEN_TOKEN,
         roleId: DASHEN_ROLE_ID,
@@ -975,6 +1005,7 @@ async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
     });
   }
   return dashenRequest("POST", SEARCH_BNET_ACCOUNT_URL, {
+    userId,
     json: {
       token: DASHEN_TOKEN,
       roleId: DASHEN_ROLE_ID,
@@ -985,17 +1016,23 @@ async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
   });
 }
 
-async function queryCard(customerToken: string): Promise<DashenResponse> {
+async function queryCard(
+  customerToken: string,
+  userId?: number
+): Promise<DashenResponse> {
   return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryCard`, {
+    userId,
     params: { token: customerToken },
   });
 }
 
 async function queryCountInfo(
   customerToken: string,
-  gameMode: CnGameMode
+  gameMode: CnGameMode,
+  userId?: number
 ): Promise<DashenResponse> {
   return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryCountInfo`, {
+    userId,
     params: { gameMode, token: customerToken },
   });
 }
@@ -1003,18 +1040,22 @@ async function queryCountInfo(
 async function queryMatchList(
   customerToken: string,
   gameMode: CnGameMode,
-  page = 1
+  page = 1,
+  userId?: number
 ): Promise<DashenResponse> {
   return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryMatchList`, {
+    userId,
     params: { token: customerToken, gameMode, page },
   });
 }
 
 async function queryMatchInfo(
   customerToken: string,
-  matchId: string
+  matchId: string,
+  userId?: number
 ): Promise<DashenResponse> {
   return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryMatchInfo`, {
+    userId,
     params: { matchId, token: customerToken },
   });
 }
@@ -1112,6 +1153,7 @@ async function ensureUserRecord(
   inviterId: number | null;
   inviteRewardQuota: number;
   user: UserProfileDto;
+  settings?: SystemSettingsDto;
 }> {
   const { tgId, nickname, username } = getTgUserMeta(ctx);
   const res = await relayInternalRequest("POST", "/internal/user/ensure", {
@@ -1564,7 +1606,6 @@ async function runPaidRoastFlow(
 
   const now = Date.now();
 
-  // 1. 正在生成中：防并发连点
   const inFlightSince = roastInFlight.get(cacheKey);
   if (inFlightSince && now - inFlightSince < AI_TIMEOUT_MS + 10_000) {
     await safeAnswerCallback(
@@ -1574,9 +1615,7 @@ async function runPaidRoastFlow(
     return;
   }
 
-  // 2. 先查内存缓存，再查 MySQL 持久化缓存（命中缓存直接复用，不扣次数）
   let reusedHtml: string | null = null;
-  let reusedFromDb = false;
 
   const memCached = roastMemoryCache.get(cacheKey);
   if (memCached && now < memCached.expiresAt) {
@@ -1612,7 +1651,6 @@ async function runPaidRoastFlow(
       );
       if (dbRes?.hit && dbRes?.record?.reviewHtml) {
         reusedHtml = String(dbRes.record.reviewHtml);
-        reusedFromDb = true;
       }
     } catch {
       // 缓存查询失败不阻断正常生成流程
@@ -1638,16 +1676,16 @@ async function runPaidRoastFlow(
     chatMap.set(sent.chat.id, sent.message_id);
     roastMemoryCache.set(cacheKey, {
       text: reusedHtml,
-      expiresAt: now + (roastType === "match" ? MATCH_ROAST_MEM_TTL_MS : PROFILE_ROAST_TTL_MS),
+      expiresAt:
+        now +
+        (roastType === "match"
+          ? MATCH_ROAST_MEM_TTL_MS
+          : PROFILE_ROAST_TTL_MS),
       chatMessages: chatMap,
     });
-    if (reusedFromDb) {
-      // 已从 MySQL 复用
-    }
     return;
   }
 
-  // 3. 未命中缓存：先校验用户/VIP/管理员锐评资格（不扣次）
   try {
     await relayInternalRequest("POST", "/internal/roast/authorize", {
       json: { tgId, nickname, username },
@@ -1657,11 +1695,14 @@ async function runPaidRoastFlow(
       authErr instanceof DashenError
         ? authErr.message
         : "⚠️ 锐评资格校验失败，请稍后重试。";
-    await safeAnswerCallback(ctx, rawMsg.replace(/<[^>]+>/g, "").slice(0, 180), true);
+    await safeAnswerCallback(
+      ctx,
+      rawMsg.replace(/<[^>]+>/g, "").slice(0, 180),
+      true
+    );
     return;
   }
 
-  // 4. 加锁并呼叫 DeepSeek 生成
   roastInFlight.set(cacheKey, now);
   await safeAnswerCallback(ctx, startToast);
 
@@ -1669,7 +1710,6 @@ async function runPaidRoastFlow(
   try {
     const resultText = await generator();
 
-    // 5. 生成成功后执行扣次（管理员与有效 VIP 自动跳过扣次）
     let quotaInfoText = "";
     try {
       const consumeRes = await relayInternalRequest(
@@ -1703,7 +1743,6 @@ async function runPaidRoastFlow(
       { parse_mode: "HTML" }
     );
 
-    // 6. 写入 MySQL 持久化缓存与内存缓存
     try {
       await relayInternalRequest("POST", "/internal/roast/cache/set", {
         json: {
@@ -1937,9 +1976,10 @@ async function callDeepSeekJson(
 async function generateDeepSeekMatchReview(
   bnet: string,
   customerToken: string,
-  matchId: string
+  matchId: string,
+  userId?: number
 ): Promise<string> {
-  const res = await queryMatchInfo(customerToken, matchId);
+  const res = await queryMatchInfo(customerToken, matchId, userId);
   const rawDetail = unwrapData(res);
   const detail =
     rawDetail &&
@@ -2097,14 +2137,15 @@ async function generateDeepSeekMatchReview(
 
 async function generateDeepSeekPlayerReview(
   bnet: string,
-  gameMode: CnGameMode
+  gameMode: CnGameMode,
+  userId?: number
 ): Promise<string> {
-  const searchRes = await searchBnetAccount(bnet);
+  const searchRes = await searchBnetAccount(bnet, userId);
   const player = extractPlayerFromSearch(bnet, searchRes);
 
   const [cardRes, countRes] = await Promise.allSettled([
-    queryCard(player.customerToken),
-    queryCountInfo(player.customerToken, gameMode),
+    queryCard(player.customerToken, userId),
+    queryCountInfo(player.customerToken, gameMode, userId),
   ]);
 
   const cardData =
@@ -2289,15 +2330,16 @@ async function generateDeepSeekPlayerReview(
 
 async function generateDeepSeekHiddenMmrReview(
   bnet: string,
-  gameMode: CnGameMode
+  gameMode: CnGameMode,
+  userId?: number
 ): Promise<string> {
-  const searchRes = await searchBnetAccount(bnet);
+  const searchRes = await searchBnetAccount(bnet, userId);
   const player = extractPlayerFromSearch(bnet, searchRes);
 
   const [cardRes, countRes, matchListRes] = await Promise.allSettled([
-    queryCard(player.customerToken),
-    queryCountInfo(player.customerToken, gameMode),
-    queryMatchList(player.customerToken, gameMode, 1),
+    queryCard(player.customerToken, userId),
+    queryCountInfo(player.customerToken, gameMode, userId),
+    queryMatchList(player.customerToken, gameMode, 1, userId),
   ]);
 
   const cardData =
@@ -2371,7 +2413,12 @@ async function generateDeepSeekHiddenMmrReview(
         `${rName}：明面 ${rankStr}（场次 ${matches || "-"}，胜率 ${Number.isFinite(winRate) ? `${winRate.toFixed(1)}%` : "-"}，KDA ${Number.isFinite(kda) ? kda.toFixed(2) : "-"}）`
       );
 
-      if (tierCn && tierBaseRank[tierCn] && matches >= 5 && Number.isFinite(winRate)) {
+      if (
+        tierCn &&
+        tierBaseRank[tierCn] &&
+        matches >= 5 &&
+        Number.isFinite(winRate)
+      ) {
         const baseIdx = tierBaseRank[tierCn];
         const currentSub = sub >= 1 && sub <= 5 ? sub : 3;
         const winDelta = winRate - 50;
@@ -2604,14 +2651,15 @@ async function generateDeepSeekHiddenMmrReview(
 
 async function buildCnOverviewView(
   bnet: string,
-  gameMode: CnGameMode
+  gameMode: CnGameMode,
+  userId?: number
 ): Promise<{ text: string; keyboard: InlineKeyboard }> {
-  const searchRes = await searchBnetAccount(bnet);
+  const searchRes = await searchBnetAccount(bnet, userId);
   const player = extractPlayerFromSearch(bnet, searchRes);
 
   const [cardRes, countRes] = await Promise.allSettled([
-    queryCard(player.customerToken),
-    queryCountInfo(player.customerToken, gameMode),
+    queryCard(player.customerToken, userId),
+    queryCountInfo(player.customerToken, gameMode, userId),
   ]);
 
   const cardData =
@@ -3006,11 +3054,17 @@ async function buildCnOverviewView(
 async function buildCnMatchListView(
   bnet: string,
   gameMode: CnGameMode,
-  page = 1
+  page = 1,
+  userId?: number
 ): Promise<{ text: string; keyboard: InlineKeyboard }> {
-  const searchRes = await searchBnetAccount(bnet);
+  const searchRes = await searchBnetAccount(bnet, userId);
   const player = extractPlayerFromSearch(bnet, searchRes);
-  const listRes = await queryMatchList(player.customerToken, gameMode, page);
+  const listRes = await queryMatchList(
+    player.customerToken,
+    gameMode,
+    page,
+    userId
+  );
   const listBody = unwrapData(listRes);
 
   const matches: any[] = Array.isArray(listBody)
@@ -3120,7 +3174,10 @@ async function buildCnMatchListView(
   return { text: lines.join("\n"), keyboard };
 }
 
-async function buildCnMatchDetailView(refId: string): Promise<{
+async function buildCnMatchDetailView(
+  refId: string,
+  userId?: number
+): Promise<{
   text: string;
   keyboard: InlineKeyboard;
 }> {
@@ -3132,7 +3189,7 @@ async function buildCnMatchDetailView(refId: string): Promise<{
     );
   }
 
-  const res = await queryMatchInfo(entry.customerToken, entry.matchId);
+  const res = await queryMatchInfo(entry.customerToken, entry.matchId, userId);
   const rawDetail = unwrapData(res);
   const detail =
     rawDetail &&
@@ -3298,7 +3355,8 @@ async function buildCnMatchDetailView(refId: string): Promise<{
 
 function buildUserCenterView(
   ctx: Context,
-  user: UserProfileDto
+  user: UserProfileDto,
+  settings?: SystemSettingsDto
 ): { text: string; keyboard: InlineKeyboard } {
   const botUsername = String(ctx.me?.username || "").trim();
   const inviteLink = botUsername
@@ -3317,6 +3375,33 @@ function buildUserCenterView(
     ? "♾ 无限次（管理员/VIP 免限）"
     : `<b>${user.quota}</b> 次`;
 
+  const regRuleText =
+    settings === undefined
+      ? "新用户首次启动赠送次数"
+      : settings.registerRewardEnabled && settings.registerRewardQuota > 0
+        ? `新用户首次启动赠送 <b>${settings.registerRewardQuota}</b> 次`
+        : "当前新注册赠送已关闭";
+
+  const invRuleText =
+    settings === undefined
+      ? "邀请好友首次启动奖励次数"
+      : settings.inviteRewardEnabled && settings.inviteRewardQuota > 0
+        ? `你立得 <b>+${settings.inviteRewardQuota}</b> 次`
+        : "当前邀请赠送已关闭";
+
+  const chkRuleText =
+    settings === undefined
+      ? "每日 00:00 签到可领次数"
+      : settings.checkinRewardEnabled && settings.checkinRewardQuota > 0
+        ? `每日 00:00 签到可再领 <b>+${settings.checkinRewardQuota}</b> 次`
+        : "每日 00:00 可签到（当前签到赠送已关闭）";
+
+  const checkinBtnLabel =
+    settings &&
+    (!settings.checkinRewardEnabled || settings.checkinRewardQuota <= 0)
+      ? "📅 每日签到"
+      : `📅 每日签到 (+${settings?.checkinRewardQuota ?? 1}次)`;
+
   const text = [
     `👤 <b>个人中心</b>`,
     `━━━━━━━━━━━━━━━━━━`,
@@ -3330,11 +3415,11 @@ function buildUserCenterView(
     `━━━━━━━━━━━━━━━━━━`,
     `🔗 <b>你的专属邀请链接：</b>`,
     `<code>${escapeHtml(inviteLink)}</code>`,
-    `<i>（好友通过链接首次启动机器人，新用户得 3 次，你立得 +1 次；每日 00:00 签到可再领 +1 次）</i>`,
+    `<i>（${regRuleText}；${invRuleText}；${chkRuleText}）</i>`,
   ].join("\n");
 
   const keyboard = new InlineKeyboard()
-    .text("📅 每日签到 (+1次)", "u:checkin")
+    .text(checkinBtnLabel, "u:checkin")
     .text("🎟 兑换卡密", "u:redeem_prompt")
     .row()
     .text("🔄 刷新个人中心", "u:me");
@@ -3391,8 +3476,59 @@ function buildAdminDashboardView(admin: AdminMeDto): {
       kb.row();
       btnInRow = 0;
     }
-    kb.text("👥 管理员管理", "ad:admins:1").text("📜 审计日志", "ad:audit:1");
+    kb.text("⚙️ 系统与赠送设置", "ad:settings:0")
+      .text("👥 管理员管理", "ad:admins:1")
+      .row()
+      .text("📜 审计日志", "ad:audit:1");
   }
+
+  return { text, keyboard: kb };
+}
+
+function buildSystemSettingsView(s: SystemSettingsDto): {
+  text: string;
+  keyboard: InlineKeyboard;
+} {
+  const isMaint = s.botStatus === "maintenance";
+  const text = [
+    `⚙️ <b>系统与赠送规则设置（仅超管）</b>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `🤖 <b>机器人状态：</b>${isMaint ? "🛠 <b>维护中</b>（仅启用管理员/超管可调试）" : "✅ <b>正常运行</b>（全体用户可用）"}`,
+    `🆕 <b>新注册赠送：</b>${s.registerRewardEnabled ? `✅ 开启（送 <b>${s.registerRewardQuota}</b> 次）` : "⛔ 关闭（送 0 次）"}`,
+    `🤝 <b>邀请人赠送：</b>${s.inviteRewardEnabled ? `✅ 开启（送 <b>${s.inviteRewardQuota}</b> 次）` : "⛔ 关闭（送 0 次）"}`,
+    `📅 <b>每日签到赠送：</b>${s.checkinRewardEnabled ? `✅ 开启（送 <b>${s.checkinRewardQuota}</b> 次）` : "⛔ 关闭（送 0 次）"}`,
+    s.updatedAt ? `🕒 <b>最近更新：</b><code>${escapeHtml(s.updatedAt)}</code>` : "",
+    `━━━━━━━━━━━━━━━━━━`,
+    `<i>点击按钮可即时切换状态或开关；输入数字可自定义赠送次数（0~10000）。</i>`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const kb = new InlineKeyboard()
+    .text(
+      isMaint ? "✅ 切换为正常运行" : "🛠 切换为维护模式",
+      "ad:st_bot"
+    )
+    .row()
+    .text(
+      s.registerRewardEnabled ? "⛔ 关闭新注册送" : "✅ 开启新注册送",
+      "ad:st_reg_tog"
+    )
+    .text("🔢 设新注册次数", "ad:q_st_reg")
+    .row()
+    .text(
+      s.inviteRewardEnabled ? "⛔ 关闭邀请送" : "✅ 开启邀请送",
+      "ad:st_inv_tog"
+    )
+    .text("🔢 设邀请次数", "ad:q_st_inv")
+    .row()
+    .text(
+      s.checkinRewardEnabled ? "⛔ 关闭签到送" : "✅ 开启签到送",
+      "ad:st_chk_tog"
+    )
+    .text("🔢 设签到次数", "ad:q_st_chk")
+    .row()
+    .text("⬅️ 返回控制台", "ad:home");
 
   return { text, keyboard: kb };
 }
@@ -3464,7 +3600,10 @@ type PendingAction =
   | "admin_genkey"
   | "admin_viewkey"
   | "admin_voidkey"
-  | "admin_add_admin";
+  | "admin_add_admin"
+  | "admin_set_reg_quota"
+  | "admin_set_inv_quota"
+  | "admin_set_chk_quota";
 
 const pendingActions = new Map<
   number,
@@ -3484,6 +3623,9 @@ const PROMPT_TAGS: Record<PendingAction, string> = {
   admin_viewkey: "后台查询卡密",
   admin_voidkey: "后台作废卡密",
   admin_add_admin: "后台添加普通管理员",
+  admin_set_reg_quota: "设置新注册赠送次数",
+  admin_set_inv_quota: "设置邀请人赠送次数",
+  admin_set_chk_quota: "设置每日签到赠送次数",
 };
 
 function setPendingAction(
@@ -3517,10 +3659,11 @@ function parseStartInviterId(rawPayload: string): number | null {
 async function executeCnQuery(ctx: Context, rawInput: string): Promise<void> {
   const bnet = rawInput.trim().split(/\s+/)[0];
   if (!bnet) return;
+  const userId = ctx.from?.id;
   await ctx.replyWithChatAction("typing");
   try {
     await ensureUserRecord(ctx);
-    const { text, keyboard } = await buildCnOverviewView(bnet, "sport");
+    const { text, keyboard } = await buildCnOverviewView(bnet, "sport", userId);
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
   } catch (err) {
     await handleCommandError(ctx, err);
@@ -3530,10 +3673,16 @@ async function executeCnQuery(ctx: Context, rawInput: string): Promise<void> {
 async function executeMatchQuery(ctx: Context, rawInput: string): Promise<void> {
   const bnet = rawInput.trim().split(/\s+/)[0];
   if (!bnet) return;
+  const userId = ctx.from?.id;
   await ctx.replyWithChatAction("typing");
   try {
     await ensureUserRecord(ctx);
-    const { text, keyboard } = await buildCnMatchListView(bnet, "sport", 1);
+    const { text, keyboard } = await buildCnMatchListView(
+      bnet,
+      "sport",
+      1,
+      userId
+    );
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
   } catch (err) {
     await handleCommandError(ctx, err);
@@ -3588,19 +3737,24 @@ async function executeCheckin(ctx: Context): Promise<void> {
     );
     return;
   }
+  const rewardLine =
+    d.rewardEnabled && d.rewardQuota > 0
+      ? `🎁 奖励：<b>+${d.rewardQuota}</b> 次锐评机会\n`
+      : `🎁 当前签到赠送已关闭（未额外增加次数）\n`;
   await ctx.reply(
-    `✅ <b>每日签到成功！</b>（<code>${escapeHtml(d.today)}</code>）\n🎁 奖励：<b>+${d.rewardQuota}</b> 次锐评机会\n⚡ 当前剩余锐评次数：<b>${d.quota}</b> 次`,
+    `✅ <b>每日签到成功！</b>（<code>${escapeHtml(d.today)}</code>）\n${rewardLine}⚡ 当前剩余锐评次数：<b>${d.quota}</b> 次`,
     { parse_mode: "HTML" }
   );
 }
 
 async function openUserCenter(ctx: Context, editExisting = false): Promise<void> {
   const { tgId, nickname, username } = getTgUserMeta(ctx);
-  const res = await relayInternalRequest("GET", "/internal/user/profile", {
-    params: { tgId, nickname, username },
+  const res = await relayInternalRequest("POST", "/internal/user/ensure", {
+    json: { tgId, nickname, username },
   });
-  const user: UserProfileDto = res.data;
-  const { text, keyboard } = buildUserCenterView(ctx, user);
+  const user: UserProfileDto = res.data.user;
+  const settings: SystemSettingsDto | undefined = res.data.settings;
+  const { text, keyboard } = buildUserCenterView(ctx, user, settings);
 
   if (editExisting) {
     await safeEditMessage(ctx, text, keyboard);
@@ -3824,6 +3978,41 @@ async function handlePendingAdminInput(
       );
       return true;
     }
+
+    if (
+      action === "admin_set_reg_quota" ||
+      action === "admin_set_inv_quota" ||
+      action === "admin_set_chk_quota"
+    ) {
+      const num = Number(text.trim());
+      if (!Number.isInteger(num) || num < 0 || num > 10000) {
+        await ctx.reply(
+          "❌ 请输入 0 ~ 10000 之间的整数次数（例如：<code>3</code> 或 <code>0</code>）。",
+          { parse_mode: "HTML" }
+        );
+        return true;
+      }
+      const fieldKey =
+        action === "admin_set_reg_quota"
+          ? "registerRewardQuota"
+          : action === "admin_set_inv_quota"
+            ? "inviteRewardQuota"
+            : "checkinRewardQuota";
+      const res = await relayInternalRequest(
+        "POST",
+        "/internal/admin/settings",
+        {
+          operatorId,
+          json: { [fieldKey]: num },
+        }
+      );
+      const { text: viewText, keyboard } = buildSystemSettingsView(res.data);
+      await ctx.reply(`✅ 次数设置已更新！\n\n${viewText}`, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+      return true;
+    }
   } catch (err) {
     await handleCommandError(ctx, err);
     return true;
@@ -3834,8 +4023,18 @@ async function handlePendingAdminInput(
 
 bot.command(["start", "help"], async (ctx) => {
   const inviterId = parseStartInviterId(ctx.match.trim());
+  let regQuotaText = "3";
+  let invQuotaText = "1";
   try {
     const info = await ensureUserRecord(ctx, inviterId);
+    if (info.settings) {
+      regQuotaText = info.settings.registerRewardEnabled
+        ? String(info.settings.registerRewardQuota)
+        : "0";
+      invQuotaText = info.settings.inviteRewardEnabled
+        ? String(info.settings.inviteRewardQuota)
+        : "0";
+    }
     if (info.inviteRewardGranted && info.inviterId) {
       await ctx.api
         .sendMessage(
@@ -3844,7 +4043,7 @@ bot.command(["start", "help"], async (ctx) => {
           { parse_mode: "HTML" }
         )
         .catch(() => {
-          // 忽略用户未主动会话或屏蔽机器人的通知失败
+          // 忽略通知发送失败
         });
     }
   } catch (err) {
@@ -3860,10 +4059,10 @@ bot.command(["start", "help"], async (ctx) => {
     ``,
     `👤 <b>个人中心与福利：</b>`,
     `• <code>/me</code> — 查看个人中心、剩余次数、邀请人数与专属邀请链接`,
-    `• <code>/checkin</code> — 每日签到领 <b>+1</b> 次锐评机会（每日 00:00 刷新）`,
+    `• <code>/checkin</code> — 每日签到领锐评机会（每日 00:00 刷新）`,
     `• <code>/redeem 卡密</code> — 兑换次数卡密或 VIP 会员卡密`,
     ``,
-    `💡 <i>新用户注册默认赠送 <b>3</b> 次锐评机会；成功邀请 1 位新用户注册奖励 <b>+1</b> 次。</i>`,
+    `💡 <i>当前规则：新注册默认送 <b>${regQuotaText}</b> 次；邀请 1 位新用户注册奖励 <b>+${invQuotaText}</b> 次。</i>`,
   ].join("\n");
 
   await ctx.reply(helpText, { parse_mode: "HTML" });
@@ -3989,9 +4188,9 @@ bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
   const parts = data.split(":");
   const action = parts[0];
+  const userId = ctx.from?.id;
 
   try {
-    // --- 用户个人中心回调 ---
     if (action === "u") {
       const sub = parts[1];
       if (sub === "me") {
@@ -4018,7 +4217,6 @@ bot.on("callback_query:data", async (ctx) => {
       }
     }
 
-    // --- 后台管理回调（仅限私聊） ---
     if (action === "ad") {
       if (ctx.chat?.type !== "private") {
         await safeAnswerCallback(ctx, "管理面板仅限私聊使用", true);
@@ -4032,6 +4230,53 @@ bot.on("callback_query:data", async (ctx) => {
         const { text, keyboard } = buildAdminDashboardView(admin);
         await safeEditMessage(ctx, text, keyboard);
         await safeAnswerCallback(ctx);
+        return;
+      }
+
+      if (sub === "settings") {
+        const res = await relayInternalRequest(
+          "GET",
+          "/internal/admin/settings",
+          { operatorId }
+        );
+        const { text, keyboard } = buildSystemSettingsView(res.data);
+        await safeEditMessage(ctx, text, keyboard);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+
+      if (
+        sub === "st_bot" ||
+        sub === "st_reg_tog" ||
+        sub === "st_inv_tog" ||
+        sub === "st_chk_tog"
+      ) {
+        const curRes = await relayInternalRequest(
+          "GET",
+          "/internal/admin/settings",
+          { operatorId }
+        );
+        const cur: SystemSettingsDto = curRes.data;
+        const patch: Record<string, any> = {};
+        if (sub === "st_bot") {
+          patch.botStatus =
+            cur.botStatus === "maintenance" ? "normal" : "maintenance";
+        } else if (sub === "st_reg_tog") {
+          patch.registerRewardEnabled = !cur.registerRewardEnabled;
+        } else if (sub === "st_inv_tog") {
+          patch.inviteRewardEnabled = !cur.inviteRewardEnabled;
+        } else if (sub === "st_chk_tog") {
+          patch.checkinRewardEnabled = !cur.checkinRewardEnabled;
+        }
+
+        const updRes = await relayInternalRequest(
+          "POST",
+          "/internal/admin/settings",
+          { operatorId, json: patch }
+        );
+        const { text, keyboard } = buildSystemSettingsView(updRes.data);
+        await safeEditMessage(ctx, text, keyboard);
+        await safeAnswerCallback(ctx, "设置已更新");
         return;
       }
 
@@ -4071,6 +4316,18 @@ bot.on("callback_query:data", async (ctx) => {
         q_addadmin: {
           act: "admin_add_admin",
           tip: "请输入格式：<code>新管理员TG_ID 备注名</code>\n例如：<code>987654321 客服小王</code>（初始为 0 权限）",
+        },
+        q_st_reg: {
+          act: "admin_set_reg_quota",
+          tip: "请输入<b>新注册赠送次数</b>（0 ~ 10000 的整数，例如 <code>3</code> 或 <code>0</code>）：",
+        },
+        q_st_inv: {
+          act: "admin_set_inv_quota",
+          tip: "请输入<b>邀请人赠送次数</b>（0 ~ 10000 的整数，例如 <code>1</code> 或 <code>0</code>）：",
+        },
+        q_st_chk: {
+          act: "admin_set_chk_quota",
+          tip: "请输入<b>每日签到赠送次数</b>（0 ~ 10000 的整数，例如 <code>1</code> 或 <code>0</code>）：",
         },
       };
 
@@ -4131,8 +4388,10 @@ bot.on("callback_query:data", async (ctx) => {
             ).row();
           }
         }
-        kb.text("➕ 添加普通管理员", "ad:q_addadmin")
-          .text("⬅️ 返回控制台", "ad:home");
+        kb.text("➕ 添加普通管理员", "ad:q_addadmin").text(
+          "⬅️ 返回控制台",
+          "ad:home"
+        );
         await safeEditMessage(ctx, lines.join("\n"), kb);
         await safeAnswerCallback(ctx);
         return;
@@ -4268,8 +4527,10 @@ bot.on("callback_query:data", async (ctx) => {
             ).row();
           }
         }
-        kb.text("➕ 添加普通管理员", "ad:q_addadmin")
-          .text("⬅️ 返回控制台", "ad:home");
+        kb.text("➕ 添加普通管理员", "ad:q_addadmin").text(
+          "⬅️ 返回控制台",
+          "ad:home"
+        );
         await safeEditMessage(ctx, lines.join("\n"), kb);
         return;
       }
@@ -4309,11 +4570,10 @@ bot.on("callback_query:data", async (ctx) => {
       }
     }
 
-    // --- 战绩总览 / 锐评 / 战绩列表 / 对局详情回调 ---
     if (action === "o" && parts.length >= 3) {
       const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
       const bnet = parts.slice(2).join(":");
-      const { text, keyboard } = await buildCnOverviewView(bnet, mode);
+      const { text, keyboard } = await buildCnOverviewView(bnet, mode, userId);
       await safeEditMessage(ctx, text, keyboard);
       await safeAnswerCallback(ctx);
       return;
@@ -4332,7 +4592,7 @@ bot.on("callback_query:data", async (ctx) => {
         startToast: "正在呼叫 DeepSeek 锐评你的赛季生涯...",
         loadingHtml: `🪞 正在整理 <b>${escapeHtml(sanitizeSafeText(bnet, "self-loading-bnet"))}</b> 的段位、赛季数据与常用英雄池，生成 DeepSeek 个人锐评中...`,
         errorFallbackHtml: "❌ DeepSeek 个人锐评生成失败，请稍后重试。",
-        generator: () => generateDeepSeekPlayerReview(bnet, mode),
+        generator: () => generateDeepSeekPlayerReview(bnet, mode, userId),
       });
       return;
     }
@@ -4350,7 +4610,7 @@ bot.on("callback_query:data", async (ctx) => {
         startToast: "正在反推你的隐性隐藏分与真实段位...",
         loadingHtml: `🔮 正在综合分析 <b>${escapeHtml(sanitizeSafeText(bnet, "mmr-loading-bnet"))}</b> 的明面段位、胜率背离度、实战效率与近期战绩走势，推演隐性段位中...`,
         errorFallbackHtml: "❌ DeepSeek 隐性段位评估生成失败，请稍后重试。",
-        generator: () => generateDeepSeekHiddenMmrReview(bnet, mode),
+        generator: () => generateDeepSeekHiddenMmrReview(bnet, mode, userId),
       });
       return;
     }
@@ -4359,14 +4619,22 @@ bot.on("callback_query:data", async (ctx) => {
       const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
       const page = Math.max(1, Number(parts[2]) || 1);
       const bnet = parts.slice(3).join(":");
-      const { text, keyboard } = await buildCnMatchListView(bnet, mode, page);
+      const { text, keyboard } = await buildCnMatchListView(
+        bnet,
+        mode,
+        page,
+        userId
+      );
       await safeEditMessage(ctx, text, keyboard);
       await safeAnswerCallback(ctx);
       return;
     }
 
     if (action === "d" && parts.length === 2) {
-      const { text, keyboard } = await buildCnMatchDetailView(parts[1]);
+      const { text, keyboard } = await buildCnMatchDetailView(
+        parts[1],
+        userId
+      );
       await safeEditMessage(ctx, text, keyboard);
       await safeAnswerCallback(ctx);
       return;
@@ -4397,7 +4665,8 @@ bot.on("callback_query:data", async (ctx) => {
           generateDeepSeekMatchReview(
             cached.bnet,
             cached.customerToken,
-            cached.matchId
+            cached.matchId,
+            userId
           ),
       });
       return;
