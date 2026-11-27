@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-27 21:26:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-27 21:42:00 (Asia/Shanghai)
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
  * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool)
@@ -39,7 +39,7 @@ const DASHEN_ORIGIN = process.env.DASHEN_ORIGIN || "https://ds.163.com";
 const DASHEN_REFERER = process.env.DASHEN_REFERER || "https://ds.163.com/";
 const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 const DASHEN_RELAY_ORIGIN = (
   process.env.DASHEN_RELAY_ORIGIN || "https://ow.eyy8.top"
@@ -48,7 +48,9 @@ const DASHEN_RELAY_ORIGIN = (
 const RELAY_SECRET = (process.env.RELAY_SECRET || "").trim();
 const VERCEL_PUBLIC_ORIGIN = (
   process.env.VERCEL_PUBLIC_ORIGIN ||
-  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://owcntg.vercel.app")
+  (process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : "https://owcntg.vercel.app")
 ).replace(/\/+$/, "");
 
 const DASHEN_API_ROOT =
@@ -71,13 +73,11 @@ const SEARCH_BNET_PARAM_KEY = (
   process.env.SEARCH_BNET_PARAM_KEY || "name"
 ).trim();
 
-// AI 锐评与隐性段位评估模型配置（支持 OpenAI 兼容格式，默认值作为 Vercel 兜底通道）
 const AI_BASE_URL = (
   process.env.AI_BASE_URL || "https://api.deepseek.com"
 ).replace(/\/+$/, "");
 const AI_API_KEY = (process.env.AI_API_KEY || "").trim();
 const AI_MODEL = (process.env.AI_MODEL || "deepseek-chat").trim();
-// Vercel 单次执行超时上限控制在 26s 以内（长思考模型请在后台切为 docker 节点，支持 120s 异步队列）
 const AI_TIMEOUT_MS = Math.min(
   Number(process.env.AI_TIMEOUT_MS || "26000") || 26000,
   26000
@@ -91,15 +91,11 @@ const DEFAULT_REGISTER_QUOTA = 3;
 const CHECKIN_REWARD_QUOTA = 1;
 const INVITE_REWARD_QUOTA = 1;
 
-// 内存中保留的用户近期查询状态（仅用于翻页与内联按钮的短上下文恢复）
 const userLastMode = new Map<number, CnGameMode>();
 const userLastBnet = new Map<number, string>();
 const userRecentMatchIds = new Map<number, string[]>();
-
-// 锐评任务并发去重锁：防止同一用户对同一目标、同一类型、同一渠道重复提交并发请求
 const inFlightRoastTasks = new Set<string>();
 
-// 管理员与普通用户的多步交互输入等待态（仅暂存操作步骤）
 type PendingUserAction =
   | { type: "redeem_input" }
   | { type: "cn_query_input" }
@@ -176,7 +172,6 @@ interface AdminMeDto {
   permissionLabels?: Record<string, string>;
 }
 
-// AI 锐评渠道结构定义（id = 0 表示 Vercel 环境变量默认 DeepSeek 兜底通道）
 interface AiProviderDto {
   id: number;
   name: string;
@@ -189,7 +184,7 @@ interface AiProviderDto {
 }
 
 // ============================================================================
-// 2. 英雄 / 地图 / 段位 / 指标 映射表
+// 2. 英雄 / 地图 / 段位 / 指标 映射表（原版完整映射表）
 // ============================================================================
 
 const DASHEN_HERO_ALIASES: Record<string, string[]> = {
@@ -531,36 +526,269 @@ const DASHEN_HERO_GUID_NAMES: Record<string, string> = {
 
 const DASHEN_MAP_NAMES: Record<string, string> = {
   "576460752303423579": "阿努比斯神殿",
+  "0x080000000000005b": "阿努比斯神殿",
   "576460752303423700": "国王大道",
+  "0x08000000000000d4": "国王大道",
   "576460752303423845": "花村",
+  "0x0800000000000165": "花村",
   "576460752303423876": "监测站：直布罗陀",
+  "0x0800000000000184": "监测站：直布罗陀",
   "576460752303423956": "努巴尼",
+  "0x08000000000001d4": "努巴尼",
   "576460752303423963": "沃斯卡娅工业区",
+  "0x08000000000001db": "沃斯卡娅工业区",
   "576460752303424175": "好莱坞",
+  "0x08000000000002af": "好莱坞",
   "576460752303424195": "多拉多",
+  "0x08000000000002c3": "多拉多",
   "576460752303424695": "尼泊尔",
+  "0x08000000000004b7": "尼泊尔",
   "576460752303424955": "66号公路",
+  "0x08000000000005bb": "66号公路",
+  "576460752303425121": "教学模式",
+  "0x0800000000000661": "教学模式",
   "576460752303425122": "漓江塔",
+  "0x0800000000000662": "漓江塔",
   "576460752303425133": "伊利奥斯",
+  "0x080000000000066d": "伊利奥斯",
+  "576460752303425160": "训练靶场",
+  "0x0800000000000688": "训练靶场",
   "576460752303425165": "艾兴瓦尔德",
+  "0x080000000000068d": "艾兴瓦尔德",
   "576460752303425182": "绿洲城",
+  "0x080000000000069e": "绿洲城",
+  "576460752303425195": "好莱坞",
+  "0x08000000000006ab": "好莱坞",
+  "576460752303425201": "国王大道",
+  "0x08000000000006b1": "国王大道",
+  "576460752303425203": "弗格体育场",
+  "0x08000000000006b3": "弗格体育场",
+  "576460752303425205": "花村",
+  "0x08000000000006b5": "花村",
+  "576460752303425207": "漓江塔",
+  "0x08000000000006b7": "漓江塔",
+  "576460752303425223": "VPP Green Room",
+  "0x08000000000006c7": "VPP Green Room",
+  "576460752303425225": "怪鼠复仇",
+  "0x08000000000006c9": "怪鼠复仇",
+  "576460752303425233": "生态监测站：南极洲",
+  "0x08000000000006d1": "生态监测站：南极洲",
+  "576460752303425235": "“地平线”月球基地",
+  "0x08000000000006d3": "“地平线”月球基地",
+  "576460752303425285": "墓园",
+  "0x0800000000000705": "墓园",
+  "576460752303425292": "黑森林",
+  "0x080000000000070c": "黑森林",
+  "576460752303425293": "生态监测站：南极洲",
+  "0x080000000000070d": "生态监测站：南极洲",
+  "576460752303425297": "漓江塔庭院",
+  "0x0800000000000711": "漓江塔庭院",
+  "576460752303425298": "漓江塔夜市",
+  "0x0800000000000712": "漓江塔夜市",
+  "576460752303425303": "尼泊尔圣所",
+  "0x0800000000000717": "尼泊尔圣所",
+  "576460752303425306": "漓江塔控制中心",
+  "0x080000000000071a": "漓江塔控制中心",
+  "576460752303425308": "城堡",
+  "0x080000000000071c": "城堡",
+  "576460752303425334": "尼泊尔村庄",
+  "0x0800000000000736": "尼泊尔村庄",
+  "576460752303425336": "尼泊尔圣坛",
+  "0x0800000000000738": "尼泊尔圣坛",
+  "576460752303425338": "伊利奥斯深井",
+  "0x080000000000073a": "伊利奥斯深井",
+  "576460752303425341": "伊利奥斯灯塔",
+  "0x080000000000073d": "伊利奥斯灯塔",
+  "576460752303425342": "伊利奥斯废墟",
+  "0x080000000000073e": "伊利奥斯废墟",
+  "576460752303425348": "漓江塔控制中心",
+  "0x0800000000000744": "漓江塔控制中心",
+  "576460752303425349": "漓江塔庭院",
+  "0x0800000000000745": "漓江塔庭院",
+  "576460752303425350": "漓江塔夜市",
+  "0x0800000000000746": "漓江塔夜市",
+  "576460752303425354": "绿洲城中心",
+  "0x080000000000074a": "绿洲城中心",
+  "576460752303425356": "绿洲城花园",
+  "0x080000000000074c": "绿洲城花园",
+  "576460752303425357": "绿洲城大学",
+  "0x080000000000074d": "绿洲城大学",
   "576460752303425366": "渣客镇",
+  "0x0800000000000756": "渣客镇",
   "576460752303425374": "暴雪世界",
+  "0x080000000000075e": "暴雪世界",
+  "576460752303425441": "阿育陀耶",
+  "0x08000000000007a1": "阿育陀耶",
+  "576460752303425444": "吉拉德堡",
+  "0x08000000000007a4": "吉拉德堡",
   "576460752303425506": "釜山",
+  "0x08000000000007e2": "釜山",
+  "576460752303425524": "阿德勒斯布鲁恩",
+  "0x08000000000007f4": "阿德勒斯布鲁恩",
+  "576460752303425527": "黑森林",
+  "0x08000000000007f7": "黑森林",
+  "576460752303425533": "圣诞节尼泊尔村庄",
+  "0x08000000000007fd": "圣诞节尼泊尔村庄",
+  "576460752303425575": "皇家赛道",
+  "0x0800000000000827": "皇家赛道",
+  "576460752303425590": "吉拉德堡",
+  "0x0800000000000836": "吉拉德堡",
   "576460752303425649": "里阿尔托",
+  "0x0800000000000871": "里阿尔托",
+  "576460752303425680": "佩特拉",
+  "0x0800000000000890": "佩特拉",
+  "576460752303425681": "巴黎",
+  "0x0800000000000891": "巴黎",
   "576460752303425848": "帕拉伊苏",
+  "0x0800000000000938": "帕拉伊苏",
   "576460752303426116": "哈瓦那",
+  "0x0800000000000a44": "哈瓦那",
+  "576460752303426139": "暴雪世界",
+  "0x0800000000000a5b": "暴雪世界",
+  "576460752303426170": "釜山寺院",
+  "0x0800000000000a7a": "釜山寺院",
+  "576460752303426182": "釜山城区",
+  "0x0800000000000a86": "釜山城区",
   "576460752303426283": "新皇后街",
+  "0x0800000000000aeb": "新皇后街",
+  "576460752303426300": "里约热内卢",
+  "0x0800000000000afc": "里约热内卢",
+  "576460752303426356": "斗兽场",
+  "0x0800000000000b34": "斗兽场",
   "576460752303426380": "中城",
+  "0x0800000000000b4c": "中城",
   "576460752303426496": "多伦多",
+  "0x0800000000000bc0": "多伦多",
+  "576460752303426518": "哥德堡",
+  "0x0800000000000bd6": "哥德堡",
+  "576460752303426624": "地图工坊岛屿",
+  "0x0800000000000c40": "地图工坊岛屿",
+  "576460752303426628": "地图工坊空地",
+  "0x0800000000000c44": "地图工坊空地",
+  "576460752303426632": "地图工坊室内",
+  "0x0800000000000c48": "地图工坊室内",
+  "576460752303426693": "香巴里寺院",
+  "0x0800000000000c85": "香巴里寺院",
+  "576460752303426734": "巴黎",
+  "0x0800000000000cae": "巴黎",
+  "576460752303426768": "地图工坊空地（夜间）",
+  "0x0800000000000cd0": "地图工坊空地（夜间）",
+  "576460752303426769": "地图工坊岛屿（夜间）",
+  "0x0800000000000cd1": "地图工坊岛屿（夜间）",
   "576460752303426771": "铁坂",
+  "0x0800000000000cd3": "铁坂",
+  "576460752303426775": "马莱温多",
+  "0x0800000000000cd7": "马莱温多",
+  "576460752303426780": "釜山体育场",
+  "0x0800000000000cdc": "釜山体育场",
+  "576460752303426795": "悉尼海港竞技场",
+  "0x0800000000000ceb": "悉尼海港竞技场",
   "576460752303426802": "南极半岛",
+  "0x0800000000000cf2": "南极半岛",
   "576460752303426878": "苏拉瓦萨",
+  "0x0800000000000d3e": "苏拉瓦萨",
+  "576460752303426892": "地图工坊绿幕",
+  "0x0800000000000d4c": "地图工坊绿幕",
   "576460752303426899": "埃斯佩兰萨",
+  "0x0800000000000d53": "埃斯佩兰萨",
   "576460752303427091": "新渣客城",
+  "0x0800000000000e13": "新渣客城",
+  "576460752303427250": "鲁纳塞彼",
+  "0x0800000000000eb2": "鲁纳塞彼",
   "576460752303427264": "萨摩亚",
-  "576460752303427628": "霓虹枢纽",
+  "0x0800000000000ec0": "萨摩亚",
+  "576460752303427312": "教学模式",
+  "0x0800000000000ef0": "教学模式",
+  "576460752303427322": "铁坂",
+  "0x0800000000000efa": "铁坂",
+  "576460752303427345": "铁坂",
+  "0x0800000000000f11": "铁坂",
+  "576460752303427346": "铁坂",
+  "0x0800000000000f12": "铁坂",
+  "576460752303427554": "英雄精通：索杰恩",
+  "0x0800000000000fe2": "英雄精通：索杰恩",
+  "576460752303427574": "英雄精通：莱因哈特",
+  "0x0800000000000ff6": "英雄精通：莱因哈特",
+  "576460752303427575": "英雄精通",
+  "0x0800000000000ff7": "英雄精通",
+  "576460752303427579": "英雄精通：猎空",
+  "0x0800000000000ffb": "英雄精通：猎空",
+  "576460752303427585": "英雄精通：士兵：76",
+  "0x0800000000001001": "英雄精通：士兵：76",
+  "576460752303427608": "国王大道",
+  "0x0800000000001018": "国王大道",
+  "576460752303427634": "斗兽场",
+  "0x0800000000001032": "斗兽场",
+  "576460752303427654": "英雄精通：源氏",
+  "0x0800000000001046": "英雄精通：源氏",
+  "576460752303427662": "英雄精通：温斯顿",
+  "0x080000000000104e": "英雄精通：温斯顿",
+  "576460752303427666": "英雄精通：天使",
+  "0x0800000000001052": "英雄精通：天使",
+  "576460752303427679": "英雄精通：查莉娅",
+  "0x080000000000105f": "英雄精通：查莉娅",
+  "576460752303427683": "英雄精通：法老之鹰",
+  "0x0800000000001063": "英雄精通：法老之鹰",
+  "576460752303427686": "英雄精通：回声",
+  "0x0800000000001066": "英雄精通：回声",
+  "576460752303427719": "英雄精通：试炼场",
+  "0x0800000000001087": "英雄精通：试炼场",
+  "576460752303427770": "英雄精通：美",
+  "0x08000000000010ba": "英雄精通：美",
+  "576460752303427798": "南极半岛",
+  "0x08000000000010d6": "南极半岛",
+  "576460752303427799": "英雄精通：雾子",
+  "0x08000000000010d7": "英雄精通：雾子",
+  "576460752303427844": "哥德堡",
+  "0x0800000000001104": "哥德堡",
+  "576460752303427865": "英雄精通：D.Va",
+  "0x0800000000001119": "英雄精通：D.Va",
+  "576460752303427880": "寺院",
+  "0x0800000000001128": "寺院",
   "576460752303427927": "花冈",
+  "0x0800000000001157": "花冈",
+  "576460752303427936": "阿努比斯王座",
+  "0x0800000000001160": "阿努比斯王座",
+  "576460752303427970": "英雄精通：布丽吉塔",
+  "0x0800000000001182": "英雄精通：布丽吉塔",
+  "576460752303427992": "英雄精通：艾什",
+  "0x0800000000001198": "英雄精通：艾什",
+  "576460752303428097": "英雄精通：卡西迪",
+  "0x0800000000001201": "英雄精通：卡西迪",
+  "576460752303428110": "监测站：直布罗陀",
+  "0x080000000000120e": "监测站：直布罗陀",
+  "576460752303428170": "黑森林",
+  "0x080000000000124a": "黑森林",
+  "576460752303428233": "阿努比斯王座",
+  "0x0800000000001289": "阿努比斯王座",
+  "576460752303428286": "阿德勒斯布鲁恩",
+  "0x08000000000012be": "阿德勒斯布鲁恩",
+  "576460752303428299": "巴黎",
+  "0x08000000000012cb": "巴黎",
+  "576460752303428186": "高架车站",
+  "0x080000000000125a": "高架车站",
+  "576460752303428190": "拉克瓦广场",
+  "0x080000000000125e": "拉克瓦广场",
+  "576460752303428192": "红杉水坝",
+  "0x0800000000001260": "红杉水坝",
+  "576460752303428219": "伊利奥斯 - 废墟",
+  "0x080000000000127b": "伊利奥斯 - 废墟",
+  "576460752303428266": "维多利亚竞技场",
+  "0x08000000000012aa": "维多利亚竞技场",
+  "576460752303428277": "阿努比斯王座",
+  "0x08000000000012b5": "阿努比斯王座",
+  "576460752303428278": "花冈",
+  "0x08000000000012b6": "花冈",
+  "576460752303428279": "斗兽场",
+  "0x08000000000012b7": "斗兽场",
+  "576460752303428337": "尼泊尔 - 圣坛",
+  "0x08000000000012f1": "尼泊尔 - 圣坛",
+  "576460752303428397": "哈瓦那",
+  "0x080000000000132d": "哈瓦那",
+  "576460752303427628": "霓虹枢纽",
+  "0x080000000000102c": "霓虹枢纽",
+  "576460752303427381": "阿特利斯",
+  "0x0800000000000f35": "阿特利斯",
   "576460752303428538": "国服新/未收录地图(576460752303428538)",
 };
 
@@ -653,6 +881,16 @@ function resolveDashenMapGuid(rawGuid: unknown): string {
   const lower = str.toLowerCase();
   if (DASHEN_MAP_NAMES[lower]) return DASHEN_MAP_NAMES[lower];
   return `地图#${str}`;
+}
+
+function resolveDashenHeroGuid(rawGuid: unknown): string {
+  if (rawGuid === undefined || rawGuid === null) return "";
+  const str = String(rawGuid).trim();
+  if (!str) return "";
+  const lower = str.toLowerCase();
+  if (HERO_ALIAS_TO_CN[lower]) return HERO_ALIAS_TO_CN[lower];
+  if (DASHEN_HERO_GUID_NAMES[lower]) return DASHEN_HERO_GUID_NAMES[lower];
+  return `英雄#${str}`;
 }
 
 // ============================================================================
@@ -1178,9 +1416,7 @@ async function resolveBotUsernameForCtx(ctx: Context): Promise<string> {
       runtimeBotUsername = fetched;
       return fetched;
     }
-  } catch {
-    // 忽略获取 Bot 用户名失败
-  }
+  } catch {}
   return "";
 }
 
@@ -1280,63 +1516,50 @@ function buildUserCenterView(
 }
 
 // ============================================================================
-// 5. 响应解包、安全文本清洗与工具函数
+// 5. 响应解包（完全还原 8 小时前正常版本的 extractPlayerFromSearch）
 // ============================================================================
 
-function escapeHtml(input: string): string {
-  return input
+function escapeHtml(text: string): string {
+  return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
-function sanitizeSafeText(raw: unknown, fieldLabel = "unknown"): string {
-  const input = String(raw ?? "");
-  const cleaned = input
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")
-    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
-
-  if (cleaned !== input) {
-    console.warn("[Sanitized Unsafe Text]", {
-      field: fieldLabel,
-      originalLength: input.length,
-      cleanedLength: cleaned.length,
-    });
-  }
-  return cleaned;
+function isSafeCallbackData(data: string): boolean {
+  return Buffer.byteLength(data, "utf8") <= 64;
 }
 
-function serializeSafeJsonBody(payload: unknown): {
+function sanitizeSafeText(input: unknown, fieldLabel = "unknown"): string {
+  const raw = String(input ?? "");
+  let step1 = "";
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdfff) continue;
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) continue;
+    step1 += raw[i];
+  }
+  return step1.replace(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g, "");
+}
+
+function serializeSafeJsonBody(payload: Record<string, any>): {
   bodyStr: string;
   byteLength: number;
 } {
-  const bodyStr = JSON.stringify(payload, (_k, v) =>
-    typeof v === "string" ? sanitizeSafeText(v, "json-field") : v
-  );
+  const rawJson = JSON.stringify(payload);
+  const bodyStr = rawJson.replace(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g, "");
   return {
     bodyStr,
     byteLength: Buffer.byteLength(bodyStr, "utf8"),
   };
 }
 
-function isSafeCallbackData(data: string): boolean {
-  return Buffer.byteLength(data, "utf8") <= 64;
-}
-
-function unwrapData<T = any>(res: DashenResponse<T> | null | undefined): any {
-  if (!res || typeof res !== "object") return null;
-  if (res.data !== undefined && res.data !== null) return res.data;
-  if (res.result !== undefined && res.result !== null) return res.result;
-  return res;
-}
-
 function pickField(obj: any, keys: string[]): any {
   if (!obj || typeof obj !== "object") return undefined;
-  for (const k of keys) {
-    if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") {
-      return obj[k];
+  for (const key of keys) {
+    if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
+      return obj[key];
     }
   }
   return undefined;
@@ -1349,15 +1572,13 @@ function pickDeepField(obj: any, keys: string[]): any {
 
   const nestedContainers = [
     obj.matchInfo,
-    obj.matchData,
-    obj.match,
+    obj.match_info,
+    obj.gameInfo,
+    obj.game_info,
     obj.summary,
-    obj.stat,
     obj.stats,
-    obj.playerStat,
-    obj.selfStat,
     obj.detail,
-    obj.ext,
+    obj.extra,
   ];
   for (const box of nestedContainers) {
     if (box && typeof box === "object") {
@@ -1368,713 +1589,969 @@ function pickDeepField(obj: any, keys: string[]): any {
   return undefined;
 }
 
-function formatNum(val: unknown, decimals = 0): string {
-  if (val === undefined || val === null || val === "") return "-";
-  const num = Number(val);
-  if (Number.isNaN(num)) return escapeHtml(String(val));
-  if (decimals > 0) {
-    return num.toFixed(decimals);
-  }
-  return Math.round(num).toLocaleString("en-US");
+function unwrapData<T = any>(res: DashenResponse<T>): any {
+  if (!res || typeof res !== "object") return res;
+  if (res.data !== undefined && res.data !== null) return res.data;
+  if (res.result !== undefined && res.result !== null) return res.result;
+  return res;
 }
 
-function formatRate(val: unknown): string {
-  if (val === undefined || val === null || val === "") return "-";
-  const str = String(val).trim();
-  if (str.endsWith("%")) return str;
-  const num = Number(str);
-  if (Number.isNaN(num)) return escapeHtml(str);
-  const pct = num > 0 && num <= 1 ? num * 100 : num;
-  return `${pct.toFixed(1)}%`;
-}
-
-function formatTimestamp(val: unknown): string {
-  if (val === undefined || val === null || val === "") return "";
-  if (typeof val === "number") {
-    const ms = val < 1e12 ? val * 1000 : val;
-    const d = new Date(ms);
-    if (!Number.isNaN(d.getTime())) {
-      return d.toISOString().replace("T", " ").slice(0, 16);
-    }
-  }
-  const s = String(val).trim();
-  if (/^\d{10,13}$/.test(s)) {
-    const ms = Number(s) < 1e12 ? Number(s) * 1000 : Number(s);
-    const d = new Date(ms);
-    if (!Number.isNaN(d.getTime())) {
-      return d.toISOString().replace("T", " ").slice(0, 16);
-    }
-  }
-  return s;
-}
-
-function formatDurationSeconds(val: unknown): string {
-  if (val === undefined || val === null || val === "") return "";
-  const num = Number(val);
-  if (Number.isNaN(num) || num <= 0) return escapeHtml(String(val));
-  const totalSec = num > 10000 ? Math.round(num / 1000) : Math.round(num);
-  const mins = Math.floor(totalSec / 60);
-  const secs = totalSec % 60;
-  return `${mins}分${String(secs).padStart(2, "0")}秒`;
-}
-
-function parseCnQueryArgs(
-  rawInput: string,
-  fallbackMode: CnGameMode = "sport"
-): { bnet: string; mode: CnGameMode } | null {
-  const cleaned = rawInput.replace("＃", "#").trim();
-  if (!cleaned) return null;
-
-  const tokens = cleaned.split(/\s+/);
-  let mode: CnGameMode = fallbackMode;
-  const bnetParts: string[] = [];
-
-  for (const tok of tokens) {
-    const lower = tok.toLowerCase();
-    if (["sport", "comp", "competitive", "竞技", "排位"].includes(lower)) {
-      mode = "sport";
-    } else if (
-      ["leisure", "quick", "qp", "快速", "休闲", "匹配"].includes(lower)
-    ) {
-      mode = "leisure";
-    } else {
-      bnetParts.push(tok);
-    }
-  }
-
-  const bnet = bnetParts.join(" ").trim();
-  if (!bnet || !bnet.includes("#")) return null;
-  const [namePart, tagPart] = bnet.split("#");
-  if (!namePart?.trim() || !tagPart?.trim() || !/^\d+$/.test(tagPart.trim())) {
-    return null;
-  }
-
-  return { bnet: `${namePart.trim()}#${tagPart.trim()}`, mode };
-}
-
-function extractCustomerTokenAndAccount(payload: DashenResponse): {
+/**
+ * 完全还原 8 小时前正常工作的战网账号搜索解包函数
+ */
+function extractPlayerFromSearch(
+  bnetInput: string,
+  res: DashenResponse
+): {
+  bnet: string;
   customerToken: string;
-  matchedBnet: string;
+  nickname: string;
+  raw: any;
 } {
-  const data = unwrapData(payload);
+  const body = unwrapData(res);
   const candidates: any[] = [];
 
-  if (Array.isArray(data)) {
-    candidates.push(...data);
-  } else if (data && typeof data === "object") {
-    for (const key of [
+  if (Array.isArray(body)) {
+    candidates.push(...body);
+  } else if (body && typeof body === "object") {
+    for (const k of [
       "list",
       "accounts",
       "accountList",
+      "players",
       "roles",
       "roleList",
-      "items",
-      "records",
-      "rows",
-      "userList",
       "data",
       "result",
+      "items",
     ]) {
-      if (Array.isArray(data[key])) {
-        candidates.push(...data[key]);
+      if (Array.isArray(body[k])) {
+        candidates.push(...body[k]);
       }
     }
     if (candidates.length === 0) {
-      candidates.push(data);
-    }
-    if (data.account && typeof data.account === "object") {
-      candidates.push(data.account);
-    }
-    if (data.user && typeof data.user === "object") {
-      candidates.push(data.user);
-    }
-    if (data.info && typeof data.info === "object") {
-      candidates.push(data.info);
+      candidates.push(body);
     }
   }
 
-  for (const item of candidates) {
-    if (!item || typeof item !== "object") continue;
-    const token = pickField(item, [
-      "customerToken",
-      "customer_token",
-      "token",
-      "userToken",
-      "roleToken",
-      "playerToken",
-      "accessToken",
-      "guid",
-      "roleId",
-      "id",
-    ]);
-    if (token !== undefined && token !== null && String(token).trim() !== "") {
-      const matchedBnet =
+  const targetLower = bnetInput.replace("＃", "#").trim().toLowerCase();
+  const matched =
+    candidates.find((item) => {
+      if (!item || typeof item !== "object") return false;
+      const tag = String(
         pickField(item, [
           "bnetName",
           "battleTag",
-          "battle_tag",
           "bnet",
-          "nickname",
-          "nickName",
           "name",
-          "roleName",
-          "accountName",
-          "gameName",
-        ]) || "";
-      return {
-        customerToken: String(token).trim(),
-        matchedBnet: String(matchedBnet).trim(),
-      };
-    }
-  }
+          "nickName",
+          "nickname",
+        ]) || ""
+      )
+        .trim()
+        .toLowerCase();
+      return tag === targetLower;
+    }) || candidates[0];
 
-  if (typeof data === "string" && data.trim()) {
-    return { customerToken: data.trim(), matchedBnet: "" };
-  }
+  const customerToken = matched
+    ? pickField(matched, [
+        "customerToken",
+        "customer_token",
+        "token",
+        "playerToken",
+        "targetToken",
+        "roleToken",
+      ])
+    : undefined;
 
-  return { customerToken: "", matchedBnet: "" };
-}
-
-async function resolveCnAccount(
-  bnet: string
-): Promise<{ customerToken: string; resolvedBnet: string }> {
-  const searchRes = await searchBnetAccount(bnet);
-  const { customerToken, matchedBnet } =
-    extractCustomerTokenAndAccount(searchRes);
   if (!customerToken) {
     throw new DashenError(
       404,
-      `🔍 未查询到国服战网账号 <code>${escapeHtml(bnet)}</code>，请确认战网昵称与数字编号是否正确（例如：<code>玩家昵称#51234</code>），且该账号已在国服《守望先锋 2》有数据记录。`
+      `❌ 未找到国服战网账号 <code>${escapeHtml(bnetInput)}</code>，或该账号尚未在网易大神同步过战绩。`
     );
   }
+
+  const nickname = String(
+    pickField(matched, [
+      "bnetName",
+      "battleTag",
+      "nickname",
+      "nickName",
+      "name",
+    ]) || bnetInput
+  );
+
   return {
-    customerToken,
-    resolvedBnet: matchedBnet || bnet,
+    bnet: bnetInput.replace("＃", "#").trim(),
+    customerToken: String(customerToken),
+    nickname,
+    raw: matched,
   };
 }
 
-// ============================================================================
-// 6. 战绩数据格式化与 AI 锐评模块（支持 Vercel 同步与 Docker 120s 异步队列）
-// ============================================================================
-
-function formatCnRankLine(roleLabel: string, rawNode: any): string {
-  if (!rawNode || typeof rawNode !== "object") {
-    return `• ${roleLabel}：<b>未定级</b>`;
+function formatNum(val: any, decimals = 0): string {
+  const n = Number(val);
+  if (val === undefined || val === null || val === "" || Number.isNaN(n)) {
+    return "-";
   }
-  const tierName = translateRankName(
-    pickField(rawNode, [
-      "tierName",
-      "rankName",
-      "rankLevelName",
-      "divisionName",
-      "tier",
-      "rank",
-    ])
-  );
-  const subTier = pickField(rawNode, [
-    "subTier",
-    "division",
-    "level",
-    "star",
-    "subRank",
-  ]);
-  const srScore = pickField(rawNode, [
-    "score",
-    "sr",
-    "rating",
-    "rankScore",
-    "points",
-  ]);
-  const games = pickField(rawNode, ["gameCount", "total", "matches", "played"]);
-  const winRate = pickField(rawNode, ["winRate", "winRatio", "winPercent"]);
-  const kda = pickField(rawNode, ["kda", "kd"]);
-
-  if (!tierName) {
-    return `• ${roleLabel}：<b>未定级</b>${games ? `（${formatNum(games)}场）` : "（暂无场次）"}`;
-  }
-
-  const rankTitle =
-    subTier !== undefined && subTier !== null && String(subTier) !== ""
-      ? `${tierName} ${subTier}`
-      : tierName;
-
-  const extras: string[] = [];
-  if (games !== undefined && games !== null) {
-    extras.push(`${formatNum(games)}场`);
-  }
-  if (winRate !== undefined && winRate !== null) {
-    extras.push(`胜率${formatRate(winRate)}`);
-  }
-  if (kda !== undefined && kda !== null) {
-    extras.push(`KDA ${formatNum(kda, 2)}`);
-  }
-
-  const scorePart =
-    srScore !== undefined && srScore !== null && Number(srScore) > 0
-      ? ` (${formatNum(srScore)}分)`
-      : "";
-  const extraPart = extras.length > 0 ? `（${extras.join(" · ")}）` : "";
-
-  return `• ${roleLabel}：<b>${escapeHtml(rankTitle)}</b>${scorePart}${extraPart}`;
+  if (decimals > 0) return n.toFixed(decimals);
+  return Math.round(n).toLocaleString("en-US");
 }
 
-function buildCnOverviewHtml(
+function formatRate(val: any): string {
+  if (val === undefined || val === null || val === "") return "-";
+  const str = String(val).trim();
+  if (str.endsWith("%")) return escapeHtml(str);
+  const num = Number(str);
+  if (Number.isNaN(num)) return escapeHtml(str);
+  return `${num.toFixed(1)}%`;
+}
+
+function formatTimestamp(ts: any): string {
+  if (ts === undefined || ts === null || ts === "") return "";
+  let ms = Number(ts);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    const parsed = Date.parse(String(ts));
+    if (!Number.isFinite(parsed) || parsed <= 0) return "";
+    ms = parsed;
+  } else if (ms < 1e12) {
+    ms *= 1000;
+  }
+  const d = new Date(ms);
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hour = String(d.getHours()).padStart(2, "0");
+  const minute = String(d.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hour}:${minute}`;
+}
+
+function parseMatchResultBadge(m: any): string {
+  const rawResult = pickDeepField(m, [
+    "matchRet",
+    "result",
+    "win",
+    "isWin",
+    "is_win",
+    "winFlag",
+    "win_flag",
+    "matchResult",
+    "match_result",
+    "battleResult",
+    "battle_result",
+    "gameResult",
+    "outcome",
+    "status",
+  ]);
+
+  const teamScoreNum = Number(pickDeepField(m, ["teamScore", "myScore"]));
+  const oppScoreNum = Number(pickDeepField(m, ["opponentScore", "enemyScore"]));
+  const hasValidScores =
+    Number.isFinite(teamScoreNum) &&
+    Number.isFinite(oppScoreNum) &&
+    teamScoreNum !== oppScoreNum;
+
+  if (typeof rawResult === "boolean") {
+    return rawResult ? "🟢胜" : "🔴负";
+  }
+
+  if (typeof rawResult === "number") {
+    if (rawResult === 1) return "🟢胜";
+    if (rawResult === -1) return "🔴负";
+    if (rawResult === 0) {
+      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
+      return "⚪平";
+    }
+    if (rawResult === 2) {
+      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
+      return "🔴负";
+    }
+    if (rawResult === 3) return "⚪平";
+  }
+
+  if (rawResult !== undefined && rawResult !== null && rawResult !== "") {
+    const s = String(rawResult).trim().toLowerCase();
+    if (["1", "true", "win", "won", "victory", "胜", "胜利"].includes(s)) {
+      return "🟢胜";
+    }
+    if (
+      ["-1", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(
+        s
+      )
+    ) {
+      return "🔴负";
+    }
+    if (["0", "2"].includes(s)) {
+      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
+      return s === "0" ? "⚪平" : "🔴负";
+    }
+    if (["3", "draw", "tie", "平", "平局"].includes(s)) {
+      return "⚪平";
+    }
+  }
+
+  if (hasValidScores) {
+    return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
+  }
+
+  return "⚪平";
+}
+
+function parseMatchMapName(m: any): string {
+  const mapVal = pickDeepField(m, [
+    "mapName",
+    "map_name",
+    "mapCnName",
+    "map_cn_name",
+    "battleMapName",
+    "sceneName",
+    "scene_name",
+    "stageName",
+    "mapTitle",
+  ]);
+
+  if (typeof mapVal === "string" && mapVal.trim()) {
+    return mapVal.trim();
+  }
+  if (mapVal && typeof mapVal === "object") {
+    const nestedName = pickField(mapVal, [
+      "name",
+      "mapName",
+      "cnName",
+      "title",
+    ]);
+    if (nestedName) return String(nestedName);
+  }
+
+  const mapGuid = pickDeepField(m, ["mapGuid", "map_guid", "mapId"]);
+  if (mapGuid !== undefined) {
+    return resolveDashenMapGuid(mapGuid);
+  }
+
+  const modeVal = pickDeepField(m, [
+    "gameModeName",
+    "modeName",
+    "subModeName",
+    "gameMode",
+  ]);
+  if (typeof modeVal === "string" && modeVal.trim()) {
+    return `${translateModeCode(modeVal)}对局`;
+  }
+
+  return "未标注地图";
+}
+
+function parseMatchHeroLabel(m: any): string {
+  const heroVal = pickDeepField(m, [
+    "heroName",
+    "hero_name",
+    "hero",
+    "mostHeroName",
+    "mainHeroName",
+  ]);
+  if (typeof heroVal === "string" && heroVal.trim()) {
+    return resolveDashenHeroName(heroVal);
+  }
+
+  const heroGuid = pickDeepField(m, ["heroGuid", "hero_guid", "heroId"]);
+  if (heroGuid !== undefined) {
+    return resolveDashenHeroGuid(heroGuid);
+  }
+
+  return "";
+}
+
+// ============================================================================
+// 6. 战绩总览 / 流水 / 单局详情视图构建（原版完整字段兼容）
+// ============================================================================
+
+async function buildCnOverviewView(
   bnet: string,
-  mode: CnGameMode,
-  cardPayload: DashenResponse,
-  countPayload: DashenResponse
-): {
-  html: string;
+  gameMode: CnGameMode,
+  isAdmin = false
+): Promise<{
+  text: string;
+  keyboard: InlineKeyboard;
   snapshotText: string;
   currentRankLabel: string;
-} {
-  const cardData = unwrapData(cardPayload) || {};
-  const countData = unwrapData(countPayload) || {};
+}> {
+  const searchRes = await searchBnetAccount(bnet);
+  const player = extractPlayerFromSearch(bnet, searchRes);
 
-  const modeLabel = mode === "sport" ? "⚔️ 竞技比赛" : "🎮 快速比赛";
-  const endorseLevel = pickField(cardData, [
-    "endorsementLevel",
-    "endorseLevel",
-    "praiseLevel",
-    "commendLevel",
+  const [cardRes, countRes] = await Promise.allSettled([
+    queryCard(player.customerToken),
+    queryCountInfo(player.customerToken, gameMode),
   ]);
-  const totalTime = pickField(cardData, [
-    "totalPlayTime",
-    "playTime",
-    "gameTime",
-    "onlineTime",
-  ]);
-  const totalGames = pickField(countData, [
-    "gameCount",
-    "totalGames",
+
+  const cardData =
+    cardRes.status === "fulfilled" ? unwrapData(cardRes.value) : null;
+  const countData =
+    countRes.status === "fulfilled" ? unwrapData(countRes.value) : null;
+
+  const modeLabel = gameMode === "sport" ? "⚔️ 竞技比赛" : "⚡ 快速比赛";
+  const displayName = escapeHtml(
+    String(
+      pickField(cardData, [
+        "bnetName",
+        "battleTag",
+        "nickname",
+        "nickName",
+        "name",
+      ]) || player.nickname
+    )
+  );
+
+  const levelVal = pickField(cardData, ["level", "endorsementLevel"]);
+  const gameTimeVal = pickField(cardData, ["gameTime", "totalGameTime"]);
+  const totalMatchVal = pickField(cardData, [
+    "totalMatchNum",
     "matchCount",
-    "total",
-    "played",
-  ]);
-  const winGames = pickField(countData, ["winCount", "wins", "win"]);
-  const loseGames = pickField(countData, ["loseCount", "losses", "lose"]);
-  const winRate = pickField(countData, ["winRate", "winRatio", "winPercent"]);
-  const kda = pickField(countData, ["kda", "kd"]);
-
-  const avgElim = pickField(countData, [
-    "avgEliminations",
-    "avgKill",
-    "killAvg",
-    "eliminationsAvg",
-  ]);
-  const avgAssist = pickField(countData, [
-    "avgAssists",
-    "avgAssist",
-    "assistAvg",
-  ]);
-  const avgDeath = pickField(countData, [
-    "avgDeaths",
-    "avgDeath",
-    "deathAvg",
-  ]);
-  const avgDamage = pickField(countData, [
-    "avgHeroDamage",
-    "avgDamage",
-    "damageAvg",
-  ]);
-  const avgHeal = pickField(countData, [
-    "avgHealing",
-    "avgHeal",
-    "healAvg",
-  ]);
-  const avgMitigated = pickField(countData, [
-    "avgDamageBlocked",
-    "avgMitigated",
-    "mitigatedAvg",
-    "defenseAvg",
+    "totalCount",
   ]);
 
-  const rankContainer =
-    cardData.rankInfo ||
-    cardData.ranks ||
-    cardData.competitiveRank ||
-    cardData.tierInfo ||
-    cardData;
-
-  const tankNode =
-    rankContainer?.tank ||
-    rankContainer?.heavy ||
-    rankContainer?.TANK ||
-    cardData?.tankRank;
-  const dpsNode =
-    rankContainer?.damage ||
-    rankContainer?.dps ||
-    rankContainer?.offense ||
-    rankContainer?.DAMAGE ||
-    cardData?.damageRank;
-  const supNode =
-    rankContainer?.support ||
-    rankContainer?.sup ||
-    rankContainer?.SUPPORT ||
-    cardData?.supportRank;
-  const openNode =
-    rankContainer?.open ||
-    rankContainer?.openQueue ||
-    rankContainer?.free ||
-    cardData?.openRank;
-
-  const tankLine = formatCnRankLine("🛡 坦克", tankNode);
-  const dpsLine = formatCnRankLine("⚔️ 输出", dpsNode);
-  const supLine = formatCnRankLine("💉 支援", supNode);
-  const openLine = formatCnRankLine("🎲 开放", openNode);
-
-  const heroListRaw =
-    countData.heroList ||
-    countData.topHeroes ||
-    countData.heroes ||
-    cardData.heroList ||
-    [];
-  const heroLines: string[] = [];
-  if (Array.isArray(heroListRaw)) {
-    for (const h of heroListRaw.slice(0, 5)) {
-      if (!h || typeof h !== "object") continue;
-      const hName =
-        resolveDashenHeroName(
-          pickField(h, ["heroName", "name", "hero", "heroId", "heroGuid"])
-        ) || "未知英雄";
-      const hGames = pickField(h, ["gameCount", "matches", "played", "total"]);
-      const hWinRate = pickField(h, ["winRate", "winRatio"]);
-      const hKda = pickField(h, ["kda", "kd"]);
-      const parts: string[] = [];
-      if (hGames !== undefined) parts.push(`${formatNum(hGames)} 场`);
-      if (hWinRate !== undefined) parts.push(`胜率 ${formatRate(hWinRate)}`);
-      if (hKda !== undefined) parts.push(`KDA ${formatNum(hKda, 2)}`);
-      heroLines.push(
-        `• <b>${escapeHtml(hName)}</b>${parts.length > 0 ? `：${parts.join(" | ")}` : ""}`
-      );
-    }
+  const metaParts: string[] = [`模式：${modeLabel}`];
+  if (levelVal !== undefined) {
+    metaParts.push(`赞赏 Lv.${escapeHtml(String(levelVal))}`);
+  }
+  if (gameTimeVal !== undefined) {
+    const gtStr =
+      typeof gameTimeVal === "number"
+        ? `${formatNum(gameTimeVal, 1)}h`
+        : escapeHtml(String(gameTimeVal));
+    metaParts.push(`总时长 ${gtStr}`);
+  }
+  if (totalMatchVal !== undefined) {
+    metaParts.push(`累计 ${formatNum(totalMatchVal)} 场`);
   }
 
   const lines: string[] = [
-    `🇨🇳 <b>${escapeHtml(bnet)}</b>（国服总览）`,
-    `模式：<b>${modeLabel}</b>${endorseLevel !== undefined ? `  |  赞赏 Lv.${formatNum(endorseLevel)}` : ""}${totalTime ? `  |  总时长 ${escapeHtml(String(totalTime))}` : ""}`,
+    `🇨🇳 <b>${displayName}</b>（国服总览）`,
+    metaParts.join("  |  "),
     `━━━━━━━━━━━━━━━━━━`,
-    `🏆 <b>竞技段位</b>`,
-    tankLine,
-    dpsLine,
-    supLine,
-    openLine,
-    `━━━━━━━━━━━━━━━━━━`,
-    `📊 <b>${mode === "sport" ? "赛季竞技汇总（职责预设）" : "快速比赛汇总"}</b>`,
   ];
 
-  if (totalGames !== undefined) {
-    const wlStr =
-      winGames !== undefined && loseGames !== undefined
-        ? ` (${formatNum(winGames)}胜 ${formatNum(loseGames)}负)`
-        : "";
-    lines.push(`🎮 场次：<b>${formatNum(totalGames)}</b>${wlStr}`);
-  }
-  if (winRate !== undefined) {
-    lines.push(`📈 胜率：<b>${formatRate(winRate)}</b>`);
-  }
-  if (kda !== undefined) {
-    lines.push(`🎯 综合 KDA：<b>${formatNum(kda, 2)}</b>`);
-  }
-  if (
-    avgElim !== undefined ||
-    avgAssist !== undefined ||
-    avgDeath !== undefined
-  ) {
-    lines.push(
-      `⚔️ 场均：消灭 <b>${formatNum(avgElim, 1)}</b> · 助攻 <b>${formatNum(avgAssist, 1)}</b> · 阵亡 <b>${formatNum(avgDeath, 1)}</b>`
-    );
-  }
-  if (
-    avgDamage !== undefined ||
-    avgHeal !== undefined ||
-    avgMitigated !== undefined
-  ) {
-    lines.push(
-      `📊 场均数值：伤害 <b>${formatNum(avgDamage)}</b> · 治疗 <b>${formatNum(avgHeal)}</b> · 抵伤 <b>${formatNum(avgMitigated)}</b>`
-    );
-  }
+  const roleMapCn: Record<string, string> = {
+    tank: "🛡 坦克",
+    dps: "⚔️ 输出",
+    damage: "⚔️ 输出",
+    healer: "💉 支援",
+    support: "💉 支援",
+    open: "🎲 开放",
+    free: "🎲 开放",
+  };
 
-  if (heroLines.length > 0) {
-    lines.push(`━━━━━━━━━━━━━━━━━━`);
-    lines.push(
-      `🔥 <b>${mode === "sport" ? "竞技常用英雄" : "快速常用英雄"}</b>`
-    );
-    lines.push(...heroLines);
-  }
+  const roleOrder = ["tank", "dps", "healer", "open"];
+  const rankLines: string[] = [];
 
-  const html = lines.join("\n");
-  const snapshotText = html.replace(/<[^>]+>/g, "");
-  const currentRankLabel = [tankLine, dpsLine, supLine]
-    .map((l) => l.replace(/<[^>]+>/g, "").replace(/^•\s*/, ""))
-    .join(" / ");
+  if (gameMode === "sport" && cardData && typeof cardData === "object") {
+    const rankList =
+      countData?.guideCountData ||
+      cardData.guideCountData ||
+      cardData.rankList ||
+      cardData.ranks ||
+      cardData.roleRankList ||
+      cardData.tierList ||
+      cardData.competitiveRanks;
 
-  return { html, snapshotText, currentRankLabel };
-}
+    if (Array.isArray(rankList) && rankList.length > 0) {
+      const normalizedRoleKey = (rawVal: unknown): string => {
+        const s = String(rawVal || "")
+          .trim()
+          .toLowerCase();
+        if (s === "tank" || s.includes("坦克") || s.includes("重装"))
+          return "tank";
+        if (s === "dps" || s === "damage" || s.includes("输出")) return "dps";
+        if (
+          s === "healer" ||
+          s === "support" ||
+          s.includes("支援") ||
+          s.includes("治疗")
+        )
+          return "healer";
+        if (
+          s === "open" ||
+          s === "free" ||
+          s.includes("开放") ||
+          s.includes("自由")
+        )
+          return "open";
+        return s || "other";
+      };
 
-function buildCnMatchListHtml(
-  bnet: string,
-  mode: CnGameMode,
-  listPayload: DashenResponse,
-  page = 1
-): {
-  html: string;
-  matchIds: string[];
-  matchMetaList: Array<{ matchId: string; label: string }>;
-} {
-  const data = unwrapData(listPayload);
-  let items: any[] = [];
-  if (Array.isArray(data)) {
-    items = data;
-  } else if (data && typeof data === "object") {
-    for (const key of ["list", "matches", "records", "items", "rows"]) {
-      if (Array.isArray(data[key])) {
-        items = data[key];
-        break;
+      const entriesByRole = new Map<string, any>();
+      const extraEntries: Array<{ key: string; item: any }> = [];
+
+      for (const r of rankList) {
+        const rawRole = pickField(r, [
+          "roleType",
+          "roleName",
+          "role",
+          "name",
+          "typeName",
+        ]);
+        const rKey = normalizedRoleKey(rawRole);
+        if (roleOrder.includes(rKey) && !entriesByRole.has(rKey)) {
+          entriesByRole.set(rKey, r);
+        } else {
+          extraEntries.push({ key: rKey, item: r });
+        }
+      }
+
+      const formatRoleLine = (
+        rKey: string,
+        r: any,
+        fallbackLabel: string
+      ): string => {
+        const roleLabel = roleMapCn[rKey] || fallbackLabel || rKey;
+        if (!r) {
+          return `• ${escapeHtml(roleLabel)}：<b>未定级</b>（暂无场次）`;
+        }
+        const lastRank = r?.lastRankInfo || r?.rankInfo || r;
+        const rawRankName = pickField(lastRank, [
+          "rankName",
+          "rank_name",
+          "tierName",
+          "divisionName",
+          "rank",
+        ]);
+        const rNameCn = translateRankName(rawRankName);
+        const rawSub = pickField(lastRank, ["rankSubTier", "rank_sub_tier"]);
+        const subNum = Number(rawSub);
+        const hasSubTier =
+          rawSub !== undefined &&
+          rawSub !== null &&
+          String(rawSub).trim() !== "" &&
+          Number.isFinite(subNum) &&
+          subNum > 0;
+        const rawScore = pickField(lastRank, ["rankScore", "rank_score"]);
+        const scoreNum = Number(rawScore);
+        const hasScore =
+          rawScore !== undefined &&
+          rawScore !== null &&
+          String(rawScore).trim() !== "" &&
+          Number.isFinite(scoreNum) &&
+          scoreNum > 0;
+
+        const tierText = rNameCn
+          ? `${rNameCn}${hasSubTier ? ` ${subNum}` : ""}${hasScore ? ` (${scoreNum}分)` : ""}`
+          : "未定级";
+        const rMatches = pickField(r, ["matchSum", "matches"]);
+        const rWin = pickField(r, ["winRate", "win_rate"]);
+        const rKda = pickField(r, ["kda"]);
+        const extra = [
+          rMatches !== undefined ? `${formatNum(rMatches)}场` : "",
+          rWin !== undefined ? `胜率${formatRate(rWin)}` : "",
+          rKda !== undefined ? `KDA ${formatNum(rKda, 2)}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
+        return `• ${escapeHtml(roleLabel)}：<b>${escapeHtml(tierText)}</b>${extra ? `（${escapeHtml(extra)}）` : ""}`;
+      };
+
+      for (const rKey of roleOrder) {
+        rankLines.push(
+          formatRoleLine(rKey, entriesByRole.get(rKey), roleMapCn[rKey])
+        );
+      }
+      for (const ex of extraEntries) {
+        const rawLabel = String(
+          pickField(ex.item, [
+            "roleType",
+            "roleName",
+            "role",
+            "name",
+            "typeName",
+          ]) || "其他"
+        );
+        rankLines.push(formatRoleLine(ex.key, ex.item, rawLabel));
+      }
+    } else {
+      const tank = pickField(cardData, ["tankRank", "tankTier", "tankLevel"]);
+      const dps = pickField(cardData, [
+        "damageRank",
+        "dpsRank",
+        "damageTier",
+        "attackRank",
+      ]);
+      const sup = pickField(cardData, [
+        "supportRank",
+        "healRank",
+        "supportTier",
+      ]);
+      const open = pickField(cardData, ["openRank", "freeRank", "openTier"]);
+      if (tank || dps || sup || open) {
+        rankLines.push(
+          `• 🛡 坦克：<b>${escapeHtml(translateRankName(tank) || "未定级")}</b>`
+        );
+        rankLines.push(
+          `• ⚔️ 输出：<b>${escapeHtml(translateRankName(dps) || "未定级")}</b>`
+        );
+        rankLines.push(
+          `• 💉 支援：<b>${escapeHtml(translateRankName(sup) || "未定级")}</b>`
+        );
+        rankLines.push(
+          `• 🎲 开放：<b>${escapeHtml(translateRankName(open) || "未定级")}</b>`
+        );
       }
     }
   }
 
-  const modeLabel = mode === "sport" ? "⚔️ 竞技比赛" : "🎮 快速比赛";
-  if (items.length === 0) {
-    return {
-      html: `📋 <b>${escapeHtml(bnet)}</b>（${modeLabel} · 第 ${page} 页）\n暂无近期战绩流水记录。`,
-      matchIds: [],
-      matchMetaList: [],
-    };
+  if (rankLines.length > 0) {
+    lines.push(`<b>🏆 竞技段位</b>`, ...rankLines, `━━━━━━━━━━━━━━━━━━`);
   }
 
-  const lines: string[] = [
-    `📋 <b>${escapeHtml(bnet)}</b>（${modeLabel} · 第 ${page} 页）`,
-    `━━━━━━━━━━━━━━━━━━`,
-  ];
-  const matchIds: string[] = [];
-  const matchMetaList: Array<{ matchId: string; label: string }> = [];
+  const statsObj =
+    (countData &&
+      (countData.presetsSummaryData ||
+        countData.total ||
+        countData.summary ||
+        countData.overview ||
+        countData)) ||
+    null;
 
-  items.slice(0, 8).forEach((item, idx) => {
-    const matchId = String(
-      pickDeepField(item, ["matchId", "id", "gameId", "recordId"]) || ""
-    ).trim();
-    if (matchId) matchIds.push(matchId);
-
-    const rawResult = String(
-      pickDeepField(item, ["result", "win", "isWin", "outcome", "status"]) ?? ""
-    ).toLowerCase();
-    const isWin = ["1", "true", "win", "victory", "胜", "胜利"].includes(
-      rawResult
-    );
-    const isDraw = ["2", "draw", "tie", "平", "平局"].includes(rawResult);
-    const resultBadge = isWin ? "✅ 胜" : isDraw ? "➖ 平" : "❌ 负";
-
-    const rawMap = pickDeepField(item, ["mapName", "map", "mapGuid", "mapId"]);
-    const mapName =
-      typeof rawMap === "string" && !/^\d+$/.test(rawMap)
-        ? rawMap
-        : resolveDashenMapGuid(rawMap) || "未知地图";
-
-    const rawHero = pickDeepField(item, [
-      "heroName",
-      "hero",
-      "heroGuid",
-      "heroId",
+  if (statsObj && typeof statsObj === "object") {
+    const totalGames = pickField(statsObj, [
+      "matchSum",
+      "totalCount",
+      "matchCount",
+      "gamesPlayed",
+      "totalGames",
+      "gameCount",
+      "totalMatchNum",
     ]);
-    const heroName = resolveDashenHeroName(rawHero) || "未知英雄";
+    const winGames = pickField(statsObj, [
+      "matchWinSum",
+      "winCount",
+      "gamesWon",
+      "wins",
+    ]);
+    const lossGames = pickField(statsObj, [
+      "matchLossSum",
+      "lossCount",
+      "gamesLost",
+      "losses",
+    ]);
+    const winRate = pickField(statsObj, [
+      "winRate",
+      "winRatio",
+      "winPercent",
+      "win_rate",
+    ]);
+    const kda = pickField(statsObj, ["kda", "avgKda", "kd"]);
+    const avgElim = pickField(statsObj, [
+      "aveKill",
+      "avgEliminations",
+      "avgKill",
+      "elimAvg",
+      "avgKills",
+    ]);
+    const avgAssist = pickField(statsObj, ["aveAssist", "avgAssists"]);
+    const avgDeath = pickField(statsObj, [
+      "aveDeath",
+      "avgDeaths",
+      "avgDeath",
+      "deathAvg",
+    ]);
+    const avgDmg = pickField(statsObj, [
+      "aveHeroDamage",
+      "avgDamage",
+      "avgHeroDamage",
+      "damageAvg",
+    ]);
+    const avgHeal = pickField(statsObj, [
+      "aveCure",
+      "avgHeal",
+      "avgHealing",
+      "healAvg",
+    ]);
+    const avgResist = pickField(statsObj, [
+      "aveResistDamage",
+      "avgResistDamage",
+    ]);
 
-    const subMode = translateModeCode(
-      pickDeepField(item, ["subMode", "modeType", "queueType", "gameSubMode"])
-    );
-    const kills = pickDeepField(item, ["eliminations", "kills", "kill"]);
-    const deaths = pickDeepField(item, ["deaths", "death"]);
-    const assists = pickDeepField(item, ["assists", "assist"]);
-    const playedAt = formatTimestamp(
-      pickDeepField(item, ["matchTime", "endTime", "createTime", "time"])
-    );
-    const duration = formatDurationSeconds(
-      pickDeepField(item, ["duration", "gameTime", "playTime"])
-    );
+    const statParts: string[] = [];
+    if (totalGames !== undefined) {
+      const wlStr =
+        winGames !== undefined || lossGames !== undefined
+          ? ` (${winGames !== undefined ? `${formatNum(winGames)}胜` : ""}${lossGames !== undefined ? ` ${formatNum(lossGames)}负` : ""})`
+          : "";
+      statParts.push(`🎮 场次：<b>${formatNum(totalGames)}</b>${wlStr}`);
+    }
+    if (winRate !== undefined || kda !== undefined) {
+      statParts.push(
+        `📈 胜率：<b>${formatRate(winRate)}</b>${kda !== undefined ? `  |  KDA：<b>${formatNum(kda, 2)}</b>` : ""}`
+      );
+    }
+    if (
+      avgElim !== undefined ||
+      avgAssist !== undefined ||
+      avgDeath !== undefined ||
+      avgDmg !== undefined ||
+      avgHeal !== undefined ||
+      avgResist !== undefined
+    ) {
+      const kdaItems = [
+        avgElim !== undefined ? `消灭 <b>${formatNum(avgElim, 1)}</b>` : "",
+        avgAssist !== undefined ? `助攻 <b>${formatNum(avgAssist, 1)}</b>` : "",
+        avgDeath !== undefined ? `阵亡 <b>${formatNum(avgDeath, 1)}</b>` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const valItems = [
+        avgDmg !== undefined ? `伤害 <b>${formatNum(avgDmg)}</b>` : "",
+        avgHeal !== undefined ? `治疗 <b>${formatNum(avgHeal)}</b>` : "",
+        avgResist !== undefined ? `抵伤 <b>${formatNum(avgResist)}</b>` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      if (kdaItems) statParts.push(`⚔️ 场均：${kdaItems}`);
+      if (valItems) statParts.push(`📊 场均数值：${valItems}`);
+    }
 
-    const kdaPart =
-      kills !== undefined || deaths !== undefined || assists !== undefined
-        ? `${formatNum(kills)}/${formatNum(deaths)}/${formatNum(assists)}`
-        : "";
+    const modeSectionTitle =
+      gameMode === "sport"
+        ? "📊 赛季竞技汇总（职责预设）"
+        : "📊 赛季快速汇总（职责预设）";
 
-    lines.push(
-      `<b>#${idx + 1}</b> ${resultBadge}  |  <b>${escapeHtml(mapName)}</b>${subMode ? `（${escapeHtml(subMode)}）` : ""}`
-    );
-    lines.push(
-      `   🦸 英雄：<b>${escapeHtml(heroName)}</b>${kdaPart ? `  |  ⚔️ K/D/A：<b>${kdaPart}</b>` : ""}`
-    );
-    if (playedAt || duration) {
+    if (statParts.length > 0) {
+      lines.push(`<b>${modeSectionTitle}</b>`, ...statParts);
+    } else {
       lines.push(
-        `   🕒 ${playedAt ? escapeHtml(playedAt) : ""}${playedAt && duration ? " · " : ""}${duration ? `时长 ${duration}` : ""}`
+        `📭 已成功拉取该玩家数据，但当前模式下暂无汇总统计（可切换模式或查看近期战绩）。`
       );
     }
 
-    if (matchId) {
-      matchMetaList.push({
-        matchId,
-        label: `#${idx + 1} ${isWin ? "胜" : isDraw ? "平" : "负"} · ${mapName} (${heroName})`,
-      });
+    const heroList =
+      countData?.presetsHeroUseSummaryList ||
+      countData?.heroList ||
+      countData?.heroes ||
+      countData?.topHeroes ||
+      cardData?.heroList ||
+      cardData?.heroes;
+    if (Array.isArray(heroList) && heroList.length > 0) {
+      const heroTitle =
+        gameMode === "sport" ? "🔥 竞技常用英雄" : "🔥 快速常用英雄";
+      lines.push(`━━━━━━━━━━━━━━━━━━`, `<b>${heroTitle}</b>`);
+      for (const h of heroList.slice(0, 5)) {
+        const hName =
+          pickField(h, [
+            "heroName",
+            "name",
+            "hero_name",
+            "cnName",
+            "heroGuid",
+            "heroId",
+          ]) || "未知英雄";
+        const hGames = pickField(h, [
+          "matchSum",
+          "totalCount",
+          "matchCount",
+          "games",
+          "count",
+        ]);
+        const hWin = pickField(h, ["winRate", "winRatio", "winPercent"]);
+        const hKda = pickField(h, ["kda", "avgKda"]);
+        const hLabel = resolveDashenHeroName(hName) || "未知英雄";
+        lines.push(
+          `• <b>${escapeHtml(hLabel)}</b>：${hGames !== undefined ? `${formatNum(hGames)}场 | ` : ""}胜率 ${formatRate(hWin)}${hKda !== undefined ? ` | KDA ${formatNum(hKda, 2)}` : ""}`
+        );
+      }
     }
+  } else {
+    lines.push(
+      `📭 该玩家在 <b>${modeLabel}</b> 下暂无有效数据，可点击下方按钮切换模式或查看近期对局。`
+    );
+  }
+
+  const text = lines.join("\n");
+  const keyboard = buildCnOverviewKeyboard(player.bnet, gameMode, isAdmin);
+  const snapshotText = text.replace(/<[^>]+>/g, "");
+  const currentRankLabel =
+    rankLines.length > 0
+      ? rankLines.map((l) => l.replace(/<[^>]+>/g, "").replace(/^•\s*/, "")).join(" / ")
+      : "未定级";
+
+  return { text, keyboard, snapshotText, currentRankLabel };
+}
+
+async function buildCnMatchListView(
+  bnet: string,
+  gameMode: CnGameMode,
+  page = 1
+): Promise<{
+  text: string;
+  keyboard: InlineKeyboard;
+  matchIds: string[];
+}> {
+  const searchRes = await searchBnetAccount(bnet);
+  const player = extractPlayerFromSearch(bnet, searchRes);
+  const listRes = await queryMatchList(player.customerToken, gameMode, page);
+  const listBody = unwrapData(listRes);
+
+  const matches: any[] = Array.isArray(listBody)
+    ? listBody
+    : Array.isArray(listBody?.matchList)
+      ? listBody.matchList
+      : listBody?.list || listBody?.records || listBody?.items || [];
+
+  const modeLabel = gameMode === "sport" ? "⚔️ 竞技" : "⚡ 快速";
+  const lines: string[] = [
+    `📋 <b>${escapeHtml(player.nickname)} — 近期战绩（第 ${page} 页）</b>`,
+    `模式：${modeLabel}  |  国服`,
+    `<i>说明：数字格式为 消灭/助攻/阵亡（含比分与时间戳）</i>`,
+    `━━━━━━━━━━━━━━━━━━`,
+  ];
+
+  const keyboard = new InlineKeyboard();
+  const matchIds: string[] = [];
+
+  if (matches.length === 0) {
+    lines.push(`📭 当前模式下第 ${page} 页暂无对局记录。`);
+  } else {
+    let detailBtnCount = 0;
+    for (let i = 0; i < Math.min(matches.length, 8); i++) {
+      const m = matches[i];
+      const matchId = String(
+        pickDeepField(m, ["matchId", "match_id", "id", "battleId"]) || ""
+      );
+      if (matchId) matchIds.push(matchId);
+
+      const mapName = parseMatchMapName(m);
+      const heroName = parseMatchHeroLabel(m);
+      const resultBadge = parseMatchResultBadge(m);
+
+      const teamScore = pickDeepField(m, ["teamScore", "myScore"]);
+      const oppScore = pickDeepField(m, ["opponentScore", "enemyScore"]);
+      const scoreStr =
+        teamScore !== undefined && oppScore !== undefined
+          ? ` [${formatNum(teamScore)}:${formatNum(oppScore)}]`
+          : "";
+
+      const kills = pickDeepField(m, [
+        "kill",
+        "eliminations",
+        "kills",
+        "elim",
+        "elimNum",
+      ]);
+      const assists = pickDeepField(m, ["assist", "assists", "assistNum"]);
+      const deaths = pickDeepField(m, ["death", "deaths", "deathNum"]);
+      const kdaStr =
+        kills !== undefined || assists !== undefined || deaths !== undefined
+          ? ` <b>${formatNum(kills)}/${formatNum(assists)}/${formatNum(deaths)}</b>`
+          : "";
+      const timeStr = formatTimestamp(
+        pickDeepField(m, [
+          "beginTs",
+          "endTime",
+          "createTime",
+          "matchTime",
+          "startTime",
+          "timestamp",
+        ])
+      );
+
+      lines.push(
+        `<b>${i + 1}.</b> ${resultBadge}${scoreStr} <b>${escapeHtml(mapName)}</b>${heroName ? ` · ${escapeHtml(heroName)}` : ""}${kdaStr}${timeStr ? `  <i>(${timeStr})</i>` : ""}`
+      );
+
+      if (matchId) {
+        const mdCb = `cn:md:${i}:${player.bnet}`;
+        if (isSafeCallbackData(mdCb)) {
+          keyboard.text(`详情 #${i + 1}`, mdCb);
+          detailBtnCount++;
+          if (detailBtnCount % 4 === 0) keyboard.row();
+        }
+      }
+    }
+    if (detailBtnCount % 4 !== 0) keyboard.row();
+  }
+
+  const nextM: CnGameMode = gameMode === "sport" ? "leisure" : "sport";
+  const prevCb = `cn:ml:${gameMode}:${Math.max(1, page - 1)}:${player.bnet}`;
+  const nextCb = `cn:ml:${gameMode}:${page + 1}:${player.bnet}`;
+  const switchCb = `cn:ml:${nextM}:1:${player.bnet}`;
+  const backCb = `cn:sw:${gameMode}:${player.bnet}`;
+
+  if (page > 1 && isSafeCallbackData(prevCb)) {
+    keyboard.text("⬅️ 上一页", prevCb);
+  }
+  if (matches.length >= 5 && isSafeCallbackData(nextCb)) {
+    keyboard.text("下一页 ➡️", nextCb);
+  }
+  if (page > 1 || matches.length >= 5) keyboard.row();
+
+  if (isSafeCallbackData(switchCb)) {
+    keyboard.text(
+      gameMode === "sport" ? "切换 ⚡快速" : "切换 ⚔️竞技",
+      switchCb
+    );
+  }
+  if (isSafeCallbackData(backCb)) {
+    keyboard.text("🏠 返回总览", backCb);
+  }
+
+  return { text: lines.join("\n"), keyboard, matchIds };
+}
+
+async function buildCnMatchDetailView(
+  bnet: string,
+  customerToken: string,
+  matchId: string
+): Promise<{
+  text: string;
+  keyboard: InlineKeyboard;
+  matchContextText: string;
+}> {
+  const res = await queryMatchInfo(customerToken, matchId);
+  const rawDetail = unwrapData(res);
+  const detail =
+    rawDetail &&
+    typeof rawDetail === "object" &&
+    rawDetail.data &&
+    typeof rawDetail.data === "object"
+      ? rawDetail.data
+      : rawDetail;
+
+  const mapName = parseMatchMapName(detail);
+  const modeName = translateModeCode(
+    pickDeepField(detail, ["gameModeName", "modeName", "gameMode"])
+  );
+  const durationSec = Number(
+    pickDeepField(detail, [
+      "gameTimeSec",
+      "duration",
+      "gameTime",
+      "matchDuration",
+    ])
+  );
+  const durationText =
+    Number.isFinite(durationSec) && durationSec > 0
+      ? `${Math.floor(durationSec / 60)}分${Math.round(durationSec % 60)}秒`
+      : "";
+
+  const teamScore = pickDeepField(detail, ["teamScore", "myScore"]);
+  const oppScore = pickDeepField(detail, ["opponentScore", "enemyScore"]);
+  const scoreText =
+    teamScore !== undefined && oppScore !== undefined
+      ? `  |  比分：<b>${formatNum(teamScore)} : ${formatNum(oppScore)}</b>`
+      : "";
+
+  const lines: string[] = [
+    `🔍 <b>${escapeHtml(mapName)}</b>${modeName ? ` (${escapeHtml(modeName)})` : ""}`,
+    `战网 ID：<code>${escapeHtml(bnet)}</code>${durationText ? `  |  时长：${escapeHtml(durationText)}` : ""}${scoreText}`,
+    `━━━━━━━━━━━━━━━━━━`,
+  ];
+
+  const teammates: any[] = Array.isArray(detail?.teammateList)
+    ? detail.teammateList
+    : [];
+  const enemies: any[] = Array.isArray(detail?.enemyList)
+    ? detail.enemyList
+    : [];
+  const heroList: any[] = Array.isArray(detail?.heroList)
+    ? detail.heroList
+    : [];
+
+  const targetLower = bnet.trim().toLowerCase();
+  const targetPrefix = targetLower.split("#")[0];
+  const matchedPlayer = [...teammates, ...enemies].find((p: any) => {
+    const pName = String(
+      pickField(p, ["name", "bnetName", "nickname"]) || ""
+    )
+      .trim()
+      .toLowerCase();
+    const pToken = String(
+      pickField(p, ["customerToken", "customer_token"]) || ""
+    ).trim();
+    return (
+      (customerToken && pToken === customerToken) ||
+      pName === targetLower ||
+      (targetPrefix && pName.startsWith(`${targetPrefix}#`))
+    );
   });
 
-  lines.push(`━━━━━━━━━━━━━━━━━━`);
-  lines.push(`<i>点击下方对局按钮可查看单场详细数据与 AI 单局锐评</i>`);
-
-  return {
-    html: lines.join("\n"),
-    matchIds,
-    matchMetaList,
-  };
-}
-
-function buildCnMatchDetailHtml(
-  bnet: string,
-  matchId: string,
-  infoPayload: DashenResponse
-): {
-  html: string;
-  matchContextText: string;
-} {
-  const data = unwrapData(infoPayload) || {};
-
-  const rawResult = String(
-    pickDeepField(data, ["result", "win", "isWin", "outcome"]) ?? ""
-  ).toLowerCase();
-  const isWin = ["1", "true", "win", "victory", "胜", "胜利"].includes(
-    rawResult
-  );
-  const isDraw = ["2", "draw", "tie", "平", "平局"].includes(rawResult);
-  const resultLabel = isWin ? "✅ 胜利" : isDraw ? "➖ 平局" : "❌ 失利";
-
-  const rawMap = pickDeepField(data, ["mapName", "map", "mapGuid", "mapId"]);
-  const mapName =
-    typeof rawMap === "string" && !/^\d+$/.test(rawMap)
-      ? rawMap
-      : resolveDashenMapGuid(rawMap) || "未知地图";
-
-  const subMode = translateModeCode(
-    pickDeepField(data, ["subMode", "modeType", "queueType", "gameMode"])
-  );
-  const duration = formatDurationSeconds(
-    pickDeepField(data, ["duration", "gameTime", "playTime"])
-  );
-  const playedAt = formatTimestamp(
-    pickDeepField(data, ["matchTime", "endTime", "createTime", "time"])
-  );
-
-  const lines: string[] = [
-    `🎯 <b>单局对局详情 — ${escapeHtml(bnet)}</b>`,
-    `🆔 对局 ID：<code>${escapeHtml(matchId)}</code>`,
-    `🗺 地图：<b>${escapeHtml(mapName)}</b>${subMode ? `（${escapeHtml(subMode)}）` : ""}  |  结果：<b>${resultLabel}</b>`,
-  ];
-  if (playedAt || duration) {
-    lines.push(
-      `🕒 时间：${playedAt ? escapeHtml(playedAt) : "-"}${duration ? `  |  时长：<b>${duration}</b>` : ""}`
+  if (matchedPlayer) {
+    const e = formatNum(
+      pickField(matchedPlayer, ["kill", "eliminations", "kills"])
     );
-  }
-  lines.push(`━━━━━━━━━━━━━━━━━━`);
-
-  const kills = pickDeepField(data, ["eliminations", "kills", "kill"]);
-  const assists = pickDeepField(data, ["assists", "assist"]);
-  const deaths = pickDeepField(data, ["deaths", "death"]);
-  const damage = pickDeepField(data, [
-    "heroDamage",
-    "damage",
-    "damageDealt",
-    "totalDamage",
-  ]);
-  const healing = pickDeepField(data, [
-    "healing",
-    "heal",
-    "healingDone",
-    "totalHeal",
-  ]);
-  const mitigated = pickDeepField(data, [
-    "damageBlocked",
-    "mitigated",
-    "defense",
-    "damageMitigated",
-  ]);
-  const rawHero = pickDeepField(data, [
-    "heroName",
-    "hero",
-    "heroGuid",
-    "heroId",
-  ]);
-  const heroName = resolveDashenHeroName(rawHero);
-
-  if (heroName) {
-    lines.push(`🦸 使用英雄：<b>${escapeHtml(heroName)}</b>`);
-  }
-  if (
-    kills !== undefined ||
-    assists !== undefined ||
-    deaths !== undefined
-  ) {
-    lines.push(
-      `⚔️ 战绩：消灭 <b>${formatNum(kills)}</b>  |  助攻 <b>${formatNum(assists)}</b>  |  阵亡 <b>${formatNum(deaths)}</b>`
+    const a = formatNum(pickField(matchedPlayer, ["assist", "assists"]));
+    const d = formatNum(pickField(matchedPlayer, ["death", "deaths"]));
+    const dmg = formatNum(pickField(matchedPlayer, ["heroDamage", "damage"]));
+    const heal = formatNum(pickField(matchedPlayer, ["cure", "healing"]));
+    const resist = formatNum(pickField(matchedPlayer, ["resistDamage"]));
+    const pHero = resolveDashenHeroGuid(
+      pickField(matchedPlayer, ["heroGuid", "heroId", "heroName"])
     );
-  }
-  if (
-    damage !== undefined ||
-    healing !== undefined ||
-    mitigated !== undefined
-  ) {
-    lines.push(
-      `📊 数值：伤害 <b>${formatNum(damage)}</b>  |  治疗 <b>${formatNum(healing)}</b>  |  抵伤 <b>${formatNum(mitigated)}</b>`
-    );
-  }
 
-  const statList =
-    data.statList || data.statsList || data.heroStats || data.details || [];
-  if (Array.isArray(statList) && statList.length > 0) {
+    lines.push(
+      `<b>🎯 查询玩家本局表现</b>${pHero ? `（主玩：${escapeHtml(pHero)}）` : ""}`
+    );
+    lines.push(`• 消灭/助攻/阵亡：<b>${e} / ${a} / ${d}</b>`);
+    lines.push(
+      `• 英雄伤害：<b>${dmg}</b>  |  治疗量：<b>${heal}</b>  |  抵伤：<b>${resist}</b>`
+    );
     lines.push(`━━━━━━━━━━━━━━━━━━`);
-    lines.push(`📌 <b>关键技术指标</b>`);
-    for (const st of statList.slice(0, 12)) {
-      if (!st || typeof st !== "object") continue;
-      const guid = String(
-        pickField(st, ["statId", "guid", "id", "key"]) || ""
-      ).trim();
-      const label =
-        pickField(st, ["name", "statName", "label"]) ||
-        DASHEN_STAT_GUID_NAMES[guid] ||
-        (guid ? `指标#${guid}` : "指标");
-      const val = pickField(st, ["value", "val", "num", "count"]);
-      if (val !== undefined && val !== null) {
-        lines.push(`• ${escapeHtml(String(label))}：<b>${formatNum(val, Number(val) % 1 !== 0 ? 2 : 0)}</b>`);
+  }
+
+  if (heroList.length > 0) {
+    lines.push(`<b>🦸 本局英雄使用明细</b>`);
+    for (const h of heroList.slice(0, 6)) {
+      const hName = resolveDashenHeroGuid(
+        pickField(h, ["heroId", "heroGuid", "heroName"])
+      );
+      const sec = Number(pickField(h, ["userTimeSec", "playTime"]) || 0);
+      const timeStr = sec > 0 ? `${Math.floor(sec / 60)}m${sec % 60}s` : "-";
+      const rateStr = pickField(h, ["useTimeRate"]);
+      const statMap =
+        h?.statMap && typeof h.statMap === "object" ? h.statMap : null;
+      const topStats: string[] = [];
+      if (statMap) {
+        for (const [statGuid, statVal] of Object.entries(statMap).slice(0, 3)) {
+          const sLabel = DASHEN_STAT_GUID_NAMES[String(statGuid)] || "";
+          if (sLabel && statVal !== undefined && statVal !== null) {
+            topStats.push(`${sLabel} ${formatNum(statVal, 1)}`);
+          }
+        }
       }
-    }
-  }
-
-  const players =
-    data.players || data.playerList || data.members || data.teamPlayers || [];
-  if (Array.isArray(players) && players.length > 0) {
-    lines.push(`━━━━━━━━━━━━━━━━━━`);
-    lines.push(`👥 <b>同局玩家表现（前 ${Math.min(10, players.length)} 人）</b>`);
-    for (const p of players.slice(0, 10)) {
-      if (!p || typeof p !== "object") continue;
-      const pName =
-        pickField(p, ["battleTag", "bnet", "name", "nickname", "playerName"]) ||
-        "玩家";
-      const pHero =
-        resolveDashenHeroName(
-          pickField(p, ["heroName", "hero", "heroGuid", "heroId"])
-        ) || "-";
-      const pk = pickField(p, ["eliminations", "kills", "kill"]);
-      const pa = pickField(p, ["assists", "assist"]);
-      const pd = pickField(p, ["deaths", "death"]);
-      const pdmg = pickField(p, ["heroDamage", "damage"]);
-      const pheal = pickField(p, ["healing", "heal"]);
       lines.push(
-        `• <b>${escapeHtml(String(pName))}</b> (${escapeHtml(pHero)})：${formatNum(pk)}/${formatNum(pa)}/${formatNum(pd)} · 伤 ${formatNum(pdmg)} · 治 ${formatNum(pheal)}`
+        `• <b>${escapeHtml(hName)}</b>：时长 ${escapeHtml(timeStr)}${rateStr !== undefined ? ` (${escapeHtml(String(rateStr))}%)` : ""}${topStats.length > 0 ? ` · ${escapeHtml(topStats.join(" / "))}` : ""}`
       );
     }
+    lines.push(`━━━━━━━━━━━━━━━━━━`);
   }
 
-  const html = lines.join("\n");
-  const matchContextText = html.replace(/<[^>]+>/g, "");
-  return { html, matchContextText };
+  const allPlayers = [
+    ...teammates.map((p) => ({ ...p, _side: "友方" })),
+    ...enemies.map((p) => ({ ...p, _side: "敌方" })),
+  ];
+
+  if (allPlayers.length > 0) {
+    lines.push(`<b>👥 本局参战玩家（消灭/助攻/阵亡 | 伤害 | 治疗）</b>`);
+    for (const p of allPlayers.slice(0, 16)) {
+      const pName = String(
+        pickField(p, ["name", "bnetName", "nickname", "playerName"]) || "玩家"
+      );
+      const pHero = resolveDashenHeroGuid(
+        pickField(p, ["heroGuid", "heroId", "heroName"])
+      );
+      const e = formatNum(pickField(p, ["kill", "eliminations", "kills"]));
+      const a = formatNum(pickField(p, ["assist", "assists"]));
+      const d = formatNum(pickField(p, ["death", "deaths"]));
+      const dmg = formatNum(pickField(p, ["heroDamage", "damage"]));
+      const heal = formatNum(pickField(p, ["cure", "healing"]));
+      lines.push(
+        `• [${p._side}] <b>${escapeHtml(pName)}</b>${pHero ? `(${escapeHtml(pHero)})` : ""}：${e}/${a}/${d} | 伤 ${dmg} | 疗 ${heal}`
+      );
+    }
+  } else if (!matchedPlayer && heroList.length === 0) {
+    lines.push(`📭 该对局暂无详细阵容与英雄统计数据。`);
+  }
+
+  const text = lines.join("\n");
+  const keyboard = buildCnMatchDetailKeyboard(bnet, matchId);
+  const matchContextText = text.replace(/<[^>]+>/g, "");
+  return { text, keyboard, matchContextText };
 }
 
 function buildCnOverviewKeyboard(
@@ -2100,34 +2577,6 @@ function buildCnOverviewKeyboard(
   }
   if (isAdmin) {
     kb.text("🛠 管理后台", "u:open_admin");
-  }
-  return kb;
-}
-
-function buildCnMatchListKeyboard(
-  bnet: string,
-  mode: CnGameMode,
-  page: number,
-  matchMetaList: Array<{ matchId: string; label: string }>
-): InlineKeyboard {
-  const kb = new InlineKeyboard();
-  matchMetaList.slice(0, 6).forEach((m, idx) => {
-    const mdData = `cn:md:${idx}:${bnet}`;
-    if (isSafeCallbackData(mdData)) {
-      kb.text(m.label.slice(0, 28), mdData).row();
-    }
-  });
-
-  if (page > 1) {
-    const prevData = `cn:ml:${mode}:${page - 1}:${bnet}`;
-    if (isSafeCallbackData(prevData)) kb.text("⬅️ 上一页", prevData);
-  }
-  const nextData = `cn:ml:${mode}:${page + 1}:${bnet}`;
-  if (isSafeCallbackData(nextData)) kb.text("➡️ 下一页", nextData);
-
-  const backOv = `cn:sw:${mode}:${bnet}`;
-  if (isSafeCallbackData(backOv)) {
-    kb.row().text("🔙 返回战绩总览", backOv);
   }
   return kb;
 }
@@ -2295,22 +2744,13 @@ async function callAiProviderJson(
     ? baseUrl
     : `${baseUrl}/chat/completions`;
 
-  const { bodyStr, byteLength } = serializeSafeJsonBody({
+  const { bodyStr } = serializeSafeJsonBody({
     model,
     temperature: 0.25,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
-  });
-
-  console.info("[AI Provider Request Payload]", {
-    provider: provider.name,
-    model,
-    chatUrl,
-    requestBodyBytes: byteLength,
-    systemPrompt: systemPrompt.slice(0, 600),
-    userPrompt: userPrompt.slice(0, 1200),
   });
 
   const response = await fetch(chatUrl, {
@@ -2356,27 +2796,13 @@ async function callAiProviderJson(
       ? contentCandidate
       : JSON.stringify(contentCandidate ?? "");
 
-  console.info("[AI Provider Raw Response]", {
-    provider: provider.name,
-    model,
-    httpStatus: response.status,
-    finishReason: firstChoice?.finish_reason ?? payload?.finish_reason ?? "",
-    hasContent: Boolean(msgObj?.content),
-    hasReasoningContent: Boolean(reasoningCandidate),
-    contentSnippet: extractedStr.slice(0, 300),
-    payloadSnippet: rawRespText.slice(0, 400),
-  });
-
   if (!response.ok) {
     throw new Error(
       `AI 接口请求失败 (HTTP ${response.status})：${rawRespText.slice(0, 200)}`
     );
   }
 
-  if (extractedStr.trim()) {
-    return extractedStr;
-  }
-  return rawRespText;
+  return extractedStr.trim() ? extractedStr : rawRespText;
 }
 
 function buildRoastPrompts(params: {
@@ -2388,8 +2814,15 @@ function buildRoastPrompts(params: {
   matchId?: string;
   matchContextText?: string;
 }): { systemPrompt: string; userPrompt: string } {
-  const { rKind, bnet, mode, snapshotText, currentRankLabel, matchId, matchContextText } =
-    params;
+  const {
+    rKind,
+    bnet,
+    mode,
+    snapshotText,
+    currentRankLabel,
+    matchId,
+    matchContextText,
+  } = params;
 
   if (rKind === "mmr") {
     return {
@@ -2468,11 +2901,8 @@ async function runVercelRoastTask(params: {
   try {
     let matchContextText = "";
     if (rKind === "match" && customerToken && matchId) {
-      const infoRes = await queryMatchInfo(customerToken, matchId);
-      matchContextText = buildCnMatchDetailHtml(
-        bnet,
-        matchId,
-        infoRes
+      matchContextText = (
+        await buildCnMatchDetailView(bnet, customerToken, matchId)
       ).matchContextText;
     }
 
@@ -2614,11 +3044,8 @@ async function enqueueDockerRoastTask(params: {
   try {
     let matchContextText = "";
     if (rKind === "match" && customerToken && matchId) {
-      const infoRes = await queryMatchInfo(customerToken, matchId);
-      matchContextText = buildCnMatchDetailHtml(
-        bnet,
-        matchId,
-        infoRes
+      matchContextText = (
+        await buildCnMatchDetailView(bnet, customerToken, matchId)
       ).matchContextText;
     }
 
@@ -2835,39 +3262,21 @@ function buildAdminHomeKeyboard(admin: AdminMeDto): InlineKeyboard {
   const perms = new Set(admin.permissions || []);
   const isSuper = admin.role === "super_admin";
 
-  if (isSuper || perms.has("user:view")) {
-    kb.text("👤 查询用户", "ad:user_q");
-  }
-  if (isSuper || perms.has("stats:view")) {
-    kb.text("📊 运营统计", "ad:stats");
-  }
+  if (isSuper || perms.has("user:view")) kb.text("👤 查询用户", "ad:user_q");
+  if (isSuper || perms.has("stats:view")) kb.text("📊 运营统计", "ad:stats");
   kb.row();
 
-  if (isSuper || perms.has("quota:add")) {
-    kb.text("➕ 添加次数", "ad:q_add");
-  }
-  if (isSuper || perms.has("quota:deduct")) {
-    kb.text("➖ 减少次数", "ad:q_sub");
-  }
+  if (isSuper || perms.has("quota:add")) kb.text("➕ 添加次数", "ad:q_add");
+  if (isSuper || perms.has("quota:deduct")) kb.text("➖ 减少次数", "ad:q_sub");
   kb.row();
 
-  if (isSuper || perms.has("vip:manage")) {
-    kb.text("👑 VIP 管理", "ad:vip");
-  }
-  if (isSuper || perms.has("user:ban")) {
-    kb.text("🚫 封禁/解封", "ad:ban");
-  }
+  if (isSuper || perms.has("vip:manage")) kb.text("👑 VIP 管理", "ad:vip");
+  if (isSuper || perms.has("user:ban")) kb.text("🚫 封禁/解封", "ad:ban");
   kb.row();
 
-  if (isSuper || perms.has("redeem:create")) {
-    kb.text("🎟 生成卡密", "ad:rc_new");
-  }
-  if (isSuper || perms.has("redeem:view")) {
-    kb.text("🔍 查询卡密", "ad:rc_view");
-  }
-  if (isSuper || perms.has("redeem:void")) {
-    kb.text("🗑 作废卡密", "ad:rc_void");
-  }
+  if (isSuper || perms.has("redeem:create")) kb.text("🎟 生成卡密", "ad:rc_new");
+  if (isSuper || perms.has("redeem:view")) kb.text("🔍 查询卡密", "ad:rc_view");
+  if (isSuper || perms.has("redeem:void")) kb.text("🗑 作废卡密", "ad:rc_void");
   kb.row();
 
   if (isSuper) {
@@ -2985,8 +3394,7 @@ async function renderAiProvidersPanel(
     `<i>说明：默认执行节点为 <b>vercel</b>；对于深度思考较慢的模型（如 <code>deepseek-v4-pro</code>），建议切换为 <b>docker</b> 节点（最长等待 120s + 排队提示）。</i>`
   );
 
-  kb.text("➕ 新增 AI 渠道", "ad:ai_add")
-    .text("🔙 返回管理主页", "ad:home");
+  kb.text("➕ 新增 AI 渠道", "ad:ai_add").text("🔙 返回管理主页", "ad:home");
 
   const text = lines.join("\n");
   if (edit && ctx.callbackQuery?.message) {
@@ -3028,14 +3436,9 @@ if (!BOT_TOKEN) {
 
 const bot = new Bot(BOT_TOKEN);
 
-// 全局错误捕获
 bot.catch((err) => {
   console.error("[grammY Bot Error]", err);
 });
-
-// ----------------------------------------------------------------------------
-// 9.1 /start 与个人中心 / 签到 / 卡密兑换
-// ----------------------------------------------------------------------------
 
 bot.command("start", async (ctx) => {
   try {
@@ -3222,7 +3625,7 @@ bot.command("redeem", async (ctx) => {
 });
 
 // ----------------------------------------------------------------------------
-// 9.2 国服战绩总览（/cn）与近期流水（/match）
+// 9.2 国服战绩总览（/cn）与近期流水（/match）—— 完全还原 8 小时前参数解析
 // ----------------------------------------------------------------------------
 
 async function executeCnOverviewQuery(
@@ -3233,42 +3636,42 @@ async function executeCnOverviewQuery(
   await assertBotNotMaintenance(ctx);
   await ensureUserRegistered(ctx);
 
+  const tokens = rawQuery.trim().split(/\s+/);
+  const bnet = tokens[0]?.replace("＃", "#").trim() || "";
+  if (!bnet) return;
+
   const tgId = Number(ctx.from?.id || 0);
-  const fallbackMode = userLastMode.get(tgId) || "sport";
-  const parsed = parseCnQueryArgs(rawQuery, fallbackMode);
-  if (!parsed) {
-    await ctx.reply(
-      `⚠️ <b>请输入完整的国服战网 ID（含 # 与数字编号）</b>\n示例：<code>/cn 宇轩#51672</code> 或 <code>/cn 宇轩#51672 快速</code>`,
-      { parse_mode: "HTML" }
-    );
-    return;
+  const secondTok = (tokens[1] || "").toLowerCase();
+  let mode: CnGameMode = userLastMode.get(tgId) || "sport";
+  if (["leisure", "quick", "qp", "快速", "休闲", "匹配"].includes(secondTok)) {
+    mode = "leisure";
+  } else if (
+    ["sport", "comp", "competitive", "竞技", "排位"].includes(secondTok)
+  ) {
+    mode = "sport";
   }
 
-  const { bnet, mode } = parsed;
   if (tgId > 0) {
     userLastMode.set(tgId, mode);
     userLastBnet.set(tgId, bnet);
   }
 
-  const { customerToken, resolvedBnet } = await resolveCnAccount(bnet);
-  const [cardRes, countRes] = await Promise.all([
-    queryCard(customerToken),
-    queryCountInfo(customerToken, mode),
-  ]);
+  if (!editMessage) {
+    await ctx.replyWithChatAction("typing");
+  }
 
   const isAdmin = await resolveIsActiveAdminForCtx(ctx);
-  const { html } = buildCnOverviewHtml(resolvedBnet, mode, cardRes, countRes);
-  const kb = buildCnOverviewKeyboard(resolvedBnet, mode, isAdmin);
+  const { text, keyboard } = await buildCnOverviewView(bnet, mode, isAdmin);
 
   if (editMessage && ctx.callbackQuery?.message) {
-    await ctx.editMessageText(html, {
+    await ctx.editMessageText(text, {
       parse_mode: "HTML",
-      reply_markup: kb,
+      reply_markup: keyboard,
     });
   } else {
-    await ctx.reply(html, {
+    await ctx.reply(text, {
       parse_mode: "HTML",
-      reply_markup: kb,
+      reply_markup: keyboard,
     });
   }
 }
@@ -3282,43 +3685,46 @@ async function executeCnMatchListQuery(
   await assertBotNotMaintenance(ctx);
   await ensureUserRegistered(ctx);
 
+  const tokens = rawQuery.trim().split(/\s+/);
+  const bnet = tokens[0]?.replace("＃", "#").trim() || "";
+  if (!bnet) return;
+
   const tgId = Number(ctx.from?.id || 0);
-  const fallbackMode = userLastMode.get(tgId) || "sport";
-  const parsed = parseCnQueryArgs(rawQuery, fallbackMode);
-  if (!parsed) {
-    await ctx.reply(
-      `⚠️ <b>请输入完整的国服战网 ID（含 # 与数字编号）</b>\n示例：<code>/match 宇轩#51672</code>`,
-      { parse_mode: "HTML" }
-    );
-    return;
+  const secondTok = (tokens[1] || "").toLowerCase();
+  let mode: CnGameMode = userLastMode.get(tgId) || "sport";
+  if (["leisure", "quick", "qp", "快速", "休闲", "匹配"].includes(secondTok)) {
+    mode = "leisure";
+  } else if (
+    ["sport", "comp", "competitive", "竞技", "排位"].includes(secondTok)
+  ) {
+    mode = "sport";
   }
 
-  const { bnet, mode } = parsed;
-  const { customerToken, resolvedBnet } = await resolveCnAccount(bnet);
-  const listRes = await queryMatchList(customerToken, mode, page);
-  const { html, matchIds, matchMetaList } = buildCnMatchListHtml(
-    resolvedBnet,
+  if (!editMessage) {
+    await ctx.replyWithChatAction("typing");
+  }
+
+  const { text, keyboard, matchIds } = await buildCnMatchListView(
+    bnet,
     mode,
-    listRes,
     page
   );
 
   if (tgId > 0) {
     userLastMode.set(tgId, mode);
-    userLastBnet.set(tgId, resolvedBnet);
+    userLastBnet.set(tgId, bnet);
     userRecentMatchIds.set(tgId, matchIds);
   }
 
-  const kb = buildCnMatchListKeyboard(resolvedBnet, mode, page, matchMetaList);
   if (editMessage && ctx.callbackQuery?.message) {
-    await ctx.editMessageText(html, {
+    await ctx.editMessageText(text, {
       parse_mode: "HTML",
-      reply_markup: kb,
+      reply_markup: keyboard,
     });
   } else {
-    await ctx.reply(html, {
+    await ctx.reply(text, {
       parse_mode: "HTML",
-      reply_markup: kb,
+      reply_markup: keyboard,
     });
   }
 }
@@ -3388,10 +3794,6 @@ bot.command("admin", async (ctx) => {
     await ctx.reply(msg, { parse_mode: "HTML" });
   }
 });
-
-// ----------------------------------------------------------------------------
-// 9.3 底部常驻快捷键盘文本处理
-// ----------------------------------------------------------------------------
 
 bot.hears("👤 个人中心", async (ctx) => {
   try {
@@ -3468,7 +3870,7 @@ bot.hears("🛠 管理员控制台", async (ctx) => {
 });
 
 // ----------------------------------------------------------------------------
-// 9.4 触发 AI 锐评（支持缓存命中、多渠道展开、去重锁与 Vercel/Docker 双节点调度）
+// 9.4 触发 AI 锐评（缓存命中 + 多渠道展开 + 去重锁 + Vercel/Docker 双节点调度）
 // ----------------------------------------------------------------------------
 
 async function dispatchRoastWithProvider(params: {
@@ -3490,7 +3892,6 @@ async function dispatchRoastWithProvider(params: {
       ? `match:${matchId}:${bnet}:p${provider.id}`
       : `${rKind}:${mode}:${bnet}:p${provider.id}`;
 
-  // 1. 先检查缓存（命中缓存直接展示，不扣减次数）
   const cachedHtml = await getRoastCache(cacheKey, rKind);
   if (cachedHtml) {
     const ttlHint =
@@ -3502,10 +3903,8 @@ async function dispatchRoastWithProvider(params: {
     return;
   }
 
-  // 2. 校验用户权限与剩余次数
   const auth = await authorizeRoastForCtx(ctx);
 
-  // 3. 并发唯一性去重锁
   const taskKey = `${tgId}:${rKind}:${arg3}:${bnet}:p${provider.id}`;
   if (inFlightRoastTasks.has(taskKey)) {
     await ctx.answerCallbackQuery({
@@ -3538,16 +3937,13 @@ async function dispatchRoastWithProvider(params: {
   const operatorNickname = getOperatorDisplayLabel(ctx);
 
   try {
-    const { customerToken, resolvedBnet } = await resolveCnAccount(bnet);
+    const searchRes = await searchBnetAccount(bnet);
+    const player = extractPlayerFromSearch(bnet, searchRes);
     let snapshotText = "";
     let currentRankLabel = "";
 
     if (rKind !== "match") {
-      const [cardRes, countRes] = await Promise.all([
-        queryCard(customerToken),
-        queryCountInfo(customerToken, mode),
-      ]);
-      const built = buildCnOverviewHtml(resolvedBnet, mode, cardRes, countRes);
+      const built = await buildCnOverviewView(player.bnet, mode, false);
       snapshotText = built.snapshotText;
       currentRankLabel = built.currentRankLabel;
     }
@@ -3559,12 +3955,12 @@ async function dispatchRoastWithProvider(params: {
         messageId: loadingMsg.message_id,
         taskKey,
         rKind,
-        bnet: resolvedBnet,
+        bnet: player.bnet,
         mode,
         snapshotText,
         currentRankLabel,
         matchId,
-        customerToken,
+        customerToken: player.customerToken,
         operatorNickname,
         provider,
         unlimited: auth.unlimited,
@@ -3577,12 +3973,12 @@ async function dispatchRoastWithProvider(params: {
         messageId: loadingMsg.message_id,
         taskKey,
         rKind,
-        bnet: resolvedBnet,
+        bnet: player.bnet,
         mode,
         snapshotText,
         currentRankLabel,
         matchId,
-        customerToken,
+        customerToken: player.customerToken,
         operatorNickname,
         provider,
         unlimited: auth.unlimited,
@@ -3707,13 +4103,16 @@ bot.on("callback_query:data", async (ctx) => {
         );
         return;
       }
-      const { customerToken, resolvedBnet } = await resolveCnAccount(bnet);
-      const infoRes = await queryMatchInfo(customerToken, matchId);
-      const { html } = buildCnMatchDetailHtml(resolvedBnet, matchId, infoRes);
-      const kb = buildCnMatchDetailKeyboard(resolvedBnet, matchId);
-      await ctx.editMessageText(html, {
+      const searchRes = await searchBnetAccount(bnet);
+      const player = extractPlayerFromSearch(bnet, searchRes);
+      const { text, keyboard } = await buildCnMatchDetailView(
+        player.bnet,
+        player.customerToken,
+        matchId
+      );
+      await ctx.editMessageText(text, {
         parse_mode: "HTML",
-        reply_markup: kb,
+        reply_markup: keyboard,
       });
       return;
     }
@@ -4085,7 +4484,6 @@ bot.on("callback_query:data", async (ctx) => {
         json: { botStatus: nextStatus },
       });
       await ctx.answerCallbackQuery({ text: "系统运行状态已更新" });
-      ctx.callbackQuery.data = "ad:settings";
       await renderAdminHomePanel(ctx, true);
       return;
     }
@@ -4213,7 +4611,6 @@ bot.on("callback_query:data", async (ctx) => {
         json: { targetTgId: targetId, permCode },
       });
       await ctx.answerCallbackQuery({ text: "权限已更新" });
-      ctx.callbackQuery.data = `ad:adm_p:${targetId}`;
       await renderAdminHomePanel(ctx, true);
       return;
     }
@@ -4310,7 +4707,7 @@ bot.on("callback_query:data", async (ctx) => {
 });
 
 // ----------------------------------------------------------------------------
-// 9.6 多步交互文本输入捕获（兑换卡密 / 快捷查询 / 管理员表单提交）
+// 9.6 多步交互文本输入捕获（兑换卡密 / 快捷查询 / 私聊直接发战网ID / 管理员表单）
 // ----------------------------------------------------------------------------
 
 bot.on("message:text", async (ctx, next) => {
@@ -4323,7 +4720,22 @@ bot.on("message:text", async (ctx, next) => {
   if (!tgId) return next();
 
   const pending = pendingUserInputs.get(tgId);
-  if (!pending) return next();
+  if (!pending) {
+    // 兼容原版：私聊直接发送 玩家#1234 自动查询国服总览
+    if (ctx.chat.type === "private" && /^\S+[#＃]\d+$/.test(text)) {
+      try {
+        await executeCnOverviewQuery(ctx, text, false);
+      } catch (err) {
+        const msg =
+          err instanceof DashenError || err instanceof RelayServiceError
+            ? err.message
+            : "❌ 查询国服战绩失败，请稍后重试。";
+        await ctx.reply(msg, { parse_mode: "HTML" });
+      }
+      return;
+    }
+    return next();
+  }
 
   if (Date.now() > pending.expiresAt) {
     pendingUserInputs.delete(tgId);
@@ -4685,7 +5097,6 @@ export default async function handler(
   );
   const action = reqUrl.searchParams.get("action") || "";
 
-  // 内部路由：接收 Docker 异步队列完成后的结果回推，由 Vercel 统一更新 TG 消息
   if (action === "docker_callback" && req.method === "POST") {
     if (RELAY_SECRET && req.headers["x-relay-secret"] !== RELAY_SECRET) {
       res.statusCode = 401;
@@ -4721,7 +5132,7 @@ export default async function handler(
       JSON.stringify({
         ok: true,
         service: "ow2-cn-tg-bot",
-        generatedAt: "2026-11-27 21:26:00",
+        generatedAt: "2026-11-27 21:42:00",
         dockerCallbackEnabled: true,
       })
     );
