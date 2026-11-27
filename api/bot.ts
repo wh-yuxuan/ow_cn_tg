@@ -1530,6 +1530,7 @@ const profileContextCache = new Map<
     customerToken: string;
     mode: CnGameMode;
     snapshotText: string;
+    currentRankLabel: string;
     expiresAt: number;
   }
 >();
@@ -1561,7 +1562,8 @@ function cacheProfileContext(
   bnet: string,
   customerToken: string,
   mode: CnGameMode,
-  snapshotText: string
+  snapshotText: string,
+  currentRankLabel = "未定级"
 ): string {
   const shortId = `p${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 5)}`;
   profileContextCache.set(shortId, {
@@ -1569,6 +1571,7 @@ function cacheProfileContext(
     customerToken,
     mode,
     snapshotText,
+    currentRankLabel,
     expiresAt: Date.now() + 30 * 60 * 1000,
   });
   if (profileContextCache.size > 200) {
@@ -1937,10 +1940,16 @@ async function generateDeepSeekProfileRoast(
     "你是一位犀利、毒舌但不失专业的《守望先锋 2》国服资深教练。",
     "请根据玩家当前模式的赛季段位、场均数据与常用英雄画像，生成一份个人赛季锐评（24小时内复用）。",
     "请只输出纯 JSON，格式如下：",
-    '{ "persona": "玩家风格标签", "strength": "核心优势", "flaw": "明显短板", "advice": "针对性提升建议", "roast": "毒舌犀利一句话锐评（100字以内）" }',
+    '{ "rating": "S/A/B/C/D", "persona": "玩家风格标签", "strength": "核心优势", "flaw": "明显短板", "advice": "针对性提升建议", "roast": "毒舌犀利一句话锐评（100字以内）" }',
   ].join("\n");
 
   const parsed = await callDeepSeekJson(systemPrompt, snapshotText);
+  const rawRating = sanitizeSafeText(parsed?.rating || "B", "p-rating")
+    .trim()
+    .toUpperCase();
+  const ratingBadge = escapeHtml(
+    /^[SABCD]$/.test(rawRating) ? rawRating : rawRating || "B"
+  );
   const persona = escapeHtml(
     sanitizeSafeText(parsed?.persona || "全能路人王", "p-persona").trim()
   );
@@ -1959,7 +1968,7 @@ async function generateDeepSeekProfileRoast(
 
   const reviewHtml = [
     `🔥 <b>个人赛季锐评 — <code>${escapeHtml(bnet)}</code></b>`,
-    `🏷 风格定位：<b>${persona}</b>  |  模式：${mode === "sport" ? "⚔️ 竞技" : "⚡ 快速"}`,
+    `🏅 综合评级：<b>${ratingBadge}</b>  |  🏷 风格定位：<b>${persona}</b>  |  模式：${mode === "sport" ? "⚔️ 竞技" : "⚡ 快速"}`,
     `━━━━━━━━━━━━━━━━━━`,
     `💪 <b>核心优势：</b>${strength}`,
     `⚠️ <b>明显短板：</b>${flaw}`,
@@ -1983,7 +1992,8 @@ async function generateDeepSeekProfileRoast(
 async function generateDeepSeekMmrEvaluation(
   bnet: string,
   mode: CnGameMode,
-  snapshotText: string
+  snapshotText: string,
+  currentRankLabel = "未定级"
 ): Promise<string> {
   const cacheKey = `mmr:${mode}:${bnet.trim().toLowerCase()}`;
   const cachedHtml = await getRoastCache(cacheKey, "mmr");
@@ -1999,6 +2009,10 @@ async function generateDeepSeekMmrEvaluation(
   ].join("\n");
 
   const parsed = await callDeepSeekJson(systemPrompt, snapshotText);
+  const safeCurrentRank = escapeHtml(
+    sanitizeSafeText(currentRankLabel || "未定级", "m-cur-rank").trim() ||
+      "未定级"
+  );
   const estTier = escapeHtml(
     sanitizeSafeText(parsed?.estimated_tier || "当前段位附近", "m-tier").trim()
   );
@@ -2017,6 +2031,7 @@ async function generateDeepSeekMmrEvaluation(
 
   const reviewHtml = [
     `🔮 <b>隐性段位评估 — <code>${escapeHtml(bnet)}</code></b>`,
+    `🧭 当前段位【<b>${safeCurrentRank}</b>】->【<b>${estTier}</b>】`,
     `🎯 预估隐性水平：<b>${estTier}</b>  |  置信度：<b>${confidence}</b>`,
     `━━━━━━━━━━━━━━━━━━`,
     `📈 <b>隐藏分走势：</b>${mmrTrend}`,
@@ -2112,6 +2127,7 @@ async function buildCnOverviewView(
 
   const roleOrder = ["tank", "dps", "healer", "open"];
   const rankLines: string[] = [];
+  const rankedRoleSummaries: string[] = [];
 
   if (gameMode === "sport" && cardData && typeof cardData === "object") {
     const rankList =
@@ -2205,6 +2221,12 @@ async function buildCnOverviewView(
         const tierText = rNameCn
           ? `${rNameCn}${hasSubTier ? ` ${subNum}` : ""}${hasScore ? ` (${scoreNum}分)` : ""}`
           : "未定级";
+        if (rNameCn) {
+          const shortRole = roleLabel.replace(/^[^\s]+\s*/, "").trim();
+          rankedRoleSummaries.push(
+            `${shortRole ? `${shortRole} ` : ""}${rNameCn}${hasSubTier ? ` ${subNum}` : ""}`
+          );
+        }
         const rMatches = pickField(r, ["matchSum", "matches"]);
         const rWin = pickField(r, ["winRate", "win_rate"]);
         const rKda = pickField(r, ["kda"]);
@@ -2411,11 +2433,16 @@ async function buildCnOverviewView(
     finalHtml.replace(/<[^>]+>/g, ""),
     "profile-snapshot"
   );
+  const currentRankLabel =
+    rankedRoleSummaries.length > 0
+      ? rankedRoleSummaries.join(" / ")
+      : "未定级";
   const pRef = cacheProfileContext(
     player.bnet,
     player.customerToken,
     gameMode,
-    plainSnapshot
+    plainSnapshot,
+    currentRankLabel
   );
 
   const keyboard = new InlineKeyboard();
@@ -3924,7 +3951,8 @@ bot.on("callback_query:data", async (ctx) => {
             ? await generateDeepSeekMmrEvaluation(
                 pEntry.bnet,
                 pEntry.mode,
-                pEntry.snapshotText
+                pEntry.snapshotText,
+                pEntry.currentRankLabel
               )
             : await generateDeepSeekProfileRoast(
                 pEntry.bnet,
