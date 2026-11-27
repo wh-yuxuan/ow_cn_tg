@@ -56,7 +56,7 @@ const DASHEN_CUSTOMER_API_BASE =
 
 const SEARCH_BNET_ACCOUNT_URL =
   process.env.SEARCH_BNET_ACCOUNT_URL ||
-  `${DASHEN_RELAY_ORIGIN}/v1/a19ld5tool/role/searchBnetAccount`;
+  `${DASHEN_CUSTOMER_API_BASE}/searchBnetAccount`;
 
 const SEARCH_BNET_METHOD = (
   process.env.SEARCH_BNET_METHOD || "GET"
@@ -647,16 +647,6 @@ function resolveDashenMapGuid(rawGuid: unknown): string {
   return `地图#${str}`;
 }
 
-function resolveDashenHeroGuid(rawGuid: unknown): string {
-  if (rawGuid === undefined || rawGuid === null) return "";
-  const str = String(rawGuid).trim();
-  if (!str) return "";
-  const lower = str.toLowerCase();
-  if (HERO_ALIAS_TO_CN[lower]) return HERO_ALIAS_TO_CN[lower];
-  if (DASHEN_HERO_GUID_NAMES[lower]) return DASHEN_HERO_GUID_NAMES[lower];
-  return `英雄#${str}`;
-}
-
 // ============================================================================
 // 3. 网易大神与服务器内部业务 HTTP 客户端
 // ============================================================================
@@ -1160,15 +1150,6 @@ async function consumeRoastByTgId(
     json: { tgId, roastType, detail },
   });
   return res.data;
-}
-
-async function consumeRoastForCtx(
-  ctx: Context,
-  roastType: "roast_match" | "roast_self" | "roast_mmr",
-  detail: string
-): Promise<{ consumed: boolean; unlimited: boolean; quota: number }> {
-  const { tgId } = getTgUserMeta(ctx);
-  return consumeRoastByTgId(tgId, roastType, detail);
 }
 
 async function resolveBotUsernameForCtx(ctx: Context): Promise<string> {
