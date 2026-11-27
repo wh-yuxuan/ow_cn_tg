@@ -1423,6 +1423,127 @@ function cacheMatchRef(
   return shortId;
 }
 
+/** 锐评防重复请求锁与结果缓存（避免同一对局/数据重复消耗 DeepSeek 额度） */
+interface RoastCacheEntry {
+  text: string;
+  expiresAt: number;
+  chatMessages: Map<number, number>;
+}
+
+const ROAST_MATCH_CACHE_TTL_MS = 60 * 60 * 1000; // 单局战绩不变，缓存 60 分钟
+const ROAST_PROFILE_CACHE_TTL_MS = 15 * 60 * 1000; // 赛季总览与隐性段位，缓存 15 分钟
+
+const roastResultCache = new Map<string, RoastCacheEntry>();
+const roastInFlight = new Map<string, number>();
+
+function pruneRoastCache(): void {
+  if (roastResultCache.size <= 300) return;
+  const now = Date.now();
+  for (const [k, v] of roastResultCache.entries()) {
+    if (now > v.expiresAt) {
+      roastResultCache.delete(k);
+    }
+  }
+}
+
+async function runCachedRoastFlow(
+  ctx: Context,
+  options: {
+    cacheKey: string;
+    ttlMs: number;
+    startToast: string;
+    loadingHtml: string;
+    errorFallbackHtml: string;
+    generator: () => Promise<string>;
+  }
+): Promise<void> {
+  const {
+    cacheKey,
+    ttlMs,
+    startToast,
+    loadingHtml,
+    errorFallbackHtml,
+    generator,
+  } = options;
+  const now = Date.now();
+
+  // 1. 命中已生成的锐评缓存：优先引用原点评消息，若原消息已删或跨会话则直接发缓存内容
+  const cached = roastResultCache.get(cacheKey);
+  if (cached && now < cached.expiresAt) {
+    await safeAnswerCallback(ctx, "♻️ 已为你调出之前的锐评结果（未重复消耗额度）");
+    const chatId = ctx.chat?.id;
+    const prevMsgId = chatId ? cached.chatMessages.get(chatId) : undefined;
+
+    if (chatId && prevMsgId) {
+      try {
+        await ctx.reply(
+          "♻️ <b>该数据已经锐评过啦</b>，已为你引用上方之前的点评结果 👆",
+          {
+            parse_mode: "HTML",
+            reply_parameters: { message_id: prevMsgId },
+          }
+        );
+        return;
+      } catch {
+        // 原消息可能已被删除，降级为直接发送缓存的完整锐评
+        cached.chatMessages.delete(chatId);
+      }
+    }
+
+    const resent = await ctx.reply(
+      `${cached.text}\n\n<i>♻️ 已命中锐评缓存，直接展示上次点评结果</i>`,
+      { parse_mode: "HTML" }
+    );
+    cached.chatMessages.set(resent.chat.id, resent.message_id);
+    return;
+  }
+
+  // 2. 正在生成中：拦截并发重复点击，给出友好等待提示
+  const inFlightSince = roastInFlight.get(cacheKey);
+  if (inFlightSince && now - inFlightSince < AI_TIMEOUT_MS + 10_000) {
+    await safeAnswerCallback(
+      ctx,
+      "⏳ 锐评正在全力生成中，请耐心等待几秒，不要重复点击哦~"
+    );
+    return;
+  }
+
+  // 3. 首次触发：加锁并调用 DeepSeek
+  roastInFlight.set(cacheKey, now);
+  await safeAnswerCallback(ctx, startToast);
+
+  const loadingMsg = await ctx.reply(loadingHtml, { parse_mode: "HTML" });
+  try {
+    const resultText = await generator();
+    await ctx.api.editMessageText(
+      loadingMsg.chat.id,
+      loadingMsg.message_id,
+      resultText,
+      { parse_mode: "HTML" }
+    );
+
+    pruneRoastCache();
+    const chatMessages = new Map<number, number>();
+    chatMessages.set(loadingMsg.chat.id, loadingMsg.message_id);
+    roastResultCache.set(cacheKey, {
+      text: resultText,
+      expiresAt: Date.now() + ttlMs,
+      chatMessages,
+    });
+  } catch (aiErr) {
+    const errHtml =
+      aiErr instanceof DashenError ? aiErr.message : errorFallbackHtml;
+    await ctx.api.editMessageText(
+      loadingMsg.chat.id,
+      loadingMsg.message_id,
+      errHtml,
+      { parse_mode: "HTML" }
+    );
+  } finally {
+    roastInFlight.delete(cacheKey);
+  }
+}
+
 // ============================================================================
 // 4.5 DeepSeek 电竞锐评生成逻辑（单场对局锐评 + 个人赛季画像 + 隐性段位评估）
 // ============================================================================
@@ -3198,62 +3319,30 @@ bot.on("callback_query:data", async (ctx) => {
     if (action === "r" && parts.length >= 3) {
       const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
       const bnet = parts.slice(2).join(":");
-      await safeAnswerCallback(ctx, "正在呼叫 DeepSeek 锐评你的赛季生涯...");
-      const loadingMsg = await ctx.reply(
-        `🪞 正在整理 <b>${escapeHtml(sanitizeSafeText(bnet, "self-loading-bnet"))}</b> 的段位、赛季数据与常用英雄池，生成 DeepSeek 个人锐评中...`,
-        { parse_mode: "HTML" }
-      );
-      try {
-        const reviewText = await generateDeepSeekPlayerReview(bnet, mode);
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          reviewText,
-          { parse_mode: "HTML" }
-        );
-      } catch (aiErr) {
-        const errHtml =
-          aiErr instanceof DashenError
-            ? aiErr.message
-            : "❌ DeepSeek 个人锐评生成失败，请稍后重试。";
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          errHtml,
-          { parse_mode: "HTML" }
-        );
-      }
+      const cacheKey = `self:${mode}:${bnet.trim().toLowerCase()}`;
+      await runCachedRoastFlow(ctx, {
+        cacheKey,
+        ttlMs: ROAST_PROFILE_CACHE_TTL_MS,
+        startToast: "正在呼叫 DeepSeek 锐评你的赛季生涯...",
+        loadingHtml: `🪞 正在整理 <b>${escapeHtml(sanitizeSafeText(bnet, "self-loading-bnet"))}</b> 的段位、赛季数据与常用英雄池，生成 DeepSeek 个人锐评中...`,
+        errorFallbackHtml: "❌ DeepSeek 个人锐评生成失败，请稍后重试。",
+        generator: () => generateDeepSeekPlayerReview(bnet, mode),
+      });
       return;
     }
 
     if (action === "h" && parts.length >= 3) {
       const mode: CnGameMode = parts[1] === "l" ? "leisure" : "sport";
       const bnet = parts.slice(2).join(":");
-      await safeAnswerCallback(ctx, "正在反推你的隐性隐藏分与真实段位...");
-      const loadingMsg = await ctx.reply(
-        `🔮 正在综合分析 <b>${escapeHtml(sanitizeSafeText(bnet, "mmr-loading-bnet"))}</b> 的明面段位、胜率背离度、实战效率与近期战绩走势，推演隐性段位中...`,
-        { parse_mode: "HTML" }
-      );
-      try {
-        const mmrText = await generateDeepSeekHiddenMmrReview(bnet, mode);
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          mmrText,
-          { parse_mode: "HTML" }
-        );
-      } catch (aiErr) {
-        const errHtml =
-          aiErr instanceof DashenError
-            ? aiErr.message
-            : "❌ DeepSeek 隐性段位评估生成失败，请稍后重试。";
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          errHtml,
-          { parse_mode: "HTML" }
-        );
-      }
+      const cacheKey = `mmr:${mode}:${bnet.trim().toLowerCase()}`;
+      await runCachedRoastFlow(ctx, {
+        cacheKey,
+        ttlMs: ROAST_PROFILE_CACHE_TTL_MS,
+        startToast: "正在反推你的隐性隐藏分与真实段位...",
+        loadingHtml: `🔮 正在综合分析 <b>${escapeHtml(sanitizeSafeText(bnet, "mmr-loading-bnet"))}</b> 的明面段位、胜率背离度、实战效率与近期战绩走势，推演隐性段位中...`,
+        errorFallbackHtml: "❌ DeepSeek 隐性段位评估生成失败，请稍后重试。",
+        generator: () => generateDeepSeekHiddenMmrReview(bnet, mode),
+      });
       return;
     }
 
@@ -3284,35 +3373,20 @@ bot.on("callback_query:data", async (ctx) => {
         );
         return;
       }
-      await safeAnswerCallback(ctx, "正在呼叫 DeepSeek 生成锐评...");
-      const loadingMsg = await ctx.reply(
-        `🤖 正在分析 <b>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</b> 的本局数据并生成 DeepSeek 锐评，请稍候...`,
-        { parse_mode: "HTML" }
-      );
-      try {
-        const reviewText = await generateDeepSeekMatchReview(
-          cached.bnet,
-          cached.customerToken,
-          cached.matchId
-        );
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          reviewText,
-          { parse_mode: "HTML" }
-        );
-      } catch (aiErr) {
-        const errHtml =
-          aiErr instanceof DashenError
-            ? aiErr.message
-            : "❌ DeepSeek 锐评生成失败，请稍后重试。";
-        await ctx.api.editMessageText(
-          loadingMsg.chat.id,
-          loadingMsg.message_id,
-          errHtml,
-          { parse_mode: "HTML" }
-        );
-      }
+      const cacheKey = `match:${cached.matchId}:${cached.bnet.trim().toLowerCase()}`;
+      await runCachedRoastFlow(ctx, {
+        cacheKey,
+        ttlMs: ROAST_MATCH_CACHE_TTL_MS,
+        startToast: "正在呼叫 DeepSeek 生成锐评...",
+        loadingHtml: `🤖 正在分析 <b>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</b> 的本局数据并生成 DeepSeek 锐评，请稍候...`,
+        errorFallbackHtml: "❌ DeepSeek 锐评生成失败，请稍后重试。",
+        generator: () =>
+          generateDeepSeekMatchReview(
+            cached.bnet,
+            cached.customerToken,
+            cached.matchId
+          ),
+      });
       return;
     }
 
