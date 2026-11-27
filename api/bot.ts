@@ -56,7 +56,7 @@ const DASHEN_CUSTOMER_API_BASE =
 
 const SEARCH_BNET_ACCOUNT_URL =
   process.env.SEARCH_BNET_ACCOUNT_URL ||
-  `${DASHEN_CUSTOMER_API_BASE}/searchBnetAccount`;
+  `${DASHEN_CUSTOMER_API_BASE}/queryBnetAccount`;
 
 const SEARCH_BNET_METHOD = (
   process.env.SEARCH_BNET_METHOD || "GET"
