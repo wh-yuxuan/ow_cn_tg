@@ -4202,7 +4202,8 @@ bot.on("callback_query:data", async (ctx) => {
             `• 累计用户数：<b>${s.totalUsers}</b>（今日新增：<b>${s.todayNewUsers}</b>）`,
             `• 今日签到人数：<b>${s.todayCheckins}</b>`,
             `• 当前有效 VIP：<b>${s.activeVips}</b>`,
-            `• 今日付费锐评消耗：<b>${s.todayPaidRoasts}</b> 次`,
+            `• 今日免费锐评消耗：<b>${Number(s.todayFreeRoasts ?? 0)}</b> 次`,
+            `• 今日付费锐评消耗：<b>${Number(s.todayPaidRoasts ?? 0)}</b> 次`,
             `• 未使用卡密库存：<b>${s.unusedRedeemCodes}</b> 张`,
           ].join("\n"),
           keyboard
