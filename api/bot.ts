@@ -4764,3 +4764,88 @@ export default async function handler(
 
   await handleWebhook(req, res);
 }
+
+
+// ... existing code ...
+async function fetchAdminMe(operatorId: number): Promise<AdminMeDto> {
+  const res = await relayInternalRequest("GET", "/internal/admin/me", {
+    operatorId,
+  });
+  return res.data;
+}
+
+/** 静默检查当前用户是否为启用中的管理员或超级管理员 */
+async function tryGetActiveAdmin(operatorId: number): Promise<AdminMeDto | null> {
+  if (!operatorId || operatorId <= 0) return null;
+  try {
+    return await fetchAdminMe(operatorId);
+  } catch {
+    return null;
+  }
+}
+
+async function handlePendingAdminInput(
+// ... existing code ...
+  const keyboard = new InlineKeyboard()
+    .text(checkinBtnLabel, "u:checkin")
+    .text("🎟 兑换卡密", "u:redeem_prompt")
+    .row()
+    .text("🔄 刷新个人中心", "u:me");
+
+  if (user.isAdmin) {
+    keyboard.row().text("🛠 管理员控制台", "u:open_admin");
+  }
+
+  return { text, keyboard };
+}
+
+function buildAdminDashboardView(admin: AdminMeDto): {
+// ... existing code ...
+async function openUserCenter(ctx: Context, editExisting = false): Promise<void> {
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  const res = await relayInternalRequest("POST", "/internal/user/ensure", {
+    json: { tgId, nickname, username },
+  });
+  const user: UserProfileDto = res.data.user;
+  const settings: SystemSettingsDto | undefined = res.data.settings;
+  if (!user.isAdmin && tgId > 0) {
+    const adminInfo = await tryGetActiveAdmin(tgId);
+    if (adminInfo && adminInfo.isActive) {
+      user.isAdmin = true;
+      user.adminRole = adminInfo.role;
+      user.roastUnlimited = true;
+    }
+  }
+  const { text, keyboard } = buildUserCenterView(ctx, user, settings);
+
+  if (editExisting) {
+    await safeEditMessage(ctx, text, keyboard);
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  }
+}
+// ... existing code ...
+    if (action === "u") {
+      const sub = parts[1];
+      if (sub === "me") {
+        await openUserCenter(ctx, true);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+      if (sub === "open_admin") {
+        if (ctx.chat?.type !== "private") {
+          await safeAnswerCallback(ctx, "管理控制台仅限私聊打开", true);
+          return;
+        }
+        const operatorId = Number(ctx.from?.id || 0);
+        const admin = await fetchAdminMe(operatorId);
+        const { text, keyboard } = buildAdminDashboardView(admin);
+        await safeEditMessage(ctx, text, keyboard);
+        await safeAnswerCallback(ctx);
+        return;
+      }
+      if (sub === "checkin") {
+// ... existing code ...
+
+
+
