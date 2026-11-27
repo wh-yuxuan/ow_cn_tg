@@ -902,6 +902,7 @@ async function setRoastCache(params: {
   gameMode?: CnGameMode | "";
   bnet: string;
   matchId?: string;
+  operatorNickname?: string;
   reviewHtml: string;
 }): Promise<void> {
   try {
@@ -931,22 +932,22 @@ function getTgUserMeta(ctx: Context): {
   return { tgId, nickname, username };
 }
 
-function parseStartInvitePayload(rawMatch: string | undefined): number | null {
-  const s = String(rawMatch || "").trim();
-  const match = s.match(/^inv_(\d+)$/i);
-  if (!match) return null;
-  const id = Number(match[1]);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
+function getOperatorDisplayLabel(ctx: Context): string {
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  if (nickname) return nickname;
+  if (username) return `@${username}`;
+  if (tgId > 0) return `TG#${tgId}`;
+  return "";
 }
 
 async function ensureUserRegistered(
   ctx: Context,
-  inviterId: number | null = null
+  inviterId?: number | null
 ): Promise<{
   isNewUser: boolean;
   inviteRewardGranted: boolean;
   inviteRewardQuota: number;
-  user: UserProfileDto | null;
+  user?: UserProfileDto;
   settings?: SystemSettingsDto;
 }> {
   const { tgId, nickname, username } = getTgUserMeta(ctx);
@@ -955,28 +956,112 @@ async function ensureUserRegistered(
       isNewUser: false,
       inviteRewardGranted: false,
       inviteRewardQuota: 0,
-      user: null,
     };
   }
   const res = await relayInternalRequest<{
     ok: boolean;
     data: {
-      isNewUser?: boolean;
-      inviteRewardGranted?: boolean;
-      inviteRewardQuota?: number;
-      user?: UserProfileDto;
-      settings?: SystemSettingsDto;
+      isNewUser: boolean;
+      inviteRewardGranted: boolean;
+      inviteRewardQuota: number;
+      user: UserProfileDto;
+      settings: SystemSettingsDto;
     };
   }>("POST", "/internal/user/ensure", {
-    json: { tgId, nickname, username, inviterId },
+    json: {
+      tgId,
+      nickname,
+      username,
+      inviterId: inviterId || null,
+    },
   });
-  return {
-    isNewUser: Boolean(res.data?.isNewUser),
-    inviteRewardGranted: Boolean(res.data?.inviteRewardGranted),
-    inviteRewardQuota: Number(res.data?.inviteRewardQuota || 0),
-    user: res.data?.user || null,
-    settings: res.data?.settings,
-  };
+  return res.data;
+}
+
+async function tryGetActiveAdmin(tgId: number): Promise<AdminMeDto | null> {
+  if (!tgId || tgId <= 0) return null;
+  try {
+    const res = await relayInternalRequest<{ ok: boolean; data: AdminMeDto }>(
+      "GET",
+      "/internal/admin/me",
+      { operatorId: tgId }
+    );
+    return res.data || null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveIsActiveAdminForCtx(ctx: Context): Promise<boolean> {
+  const tgId = Number(ctx.from?.id || 0);
+  if (!tgId || tgId <= 0) return false;
+  const admin = await tryGetActiveAdmin(tgId);
+  return Boolean(admin && admin.isActive);
+}
+
+function buildPersistentBottomKeyboard(isAdmin = false): Keyboard {
+  const kb = new Keyboard()
+    .text("👤 个人中心")
+    .text("📅 每日签到")
+    .text("🎟 兑换卡密")
+    .row()
+    .text("🇨🇳 战绩查询")
+    .text("📋 战绩流水");
+  if (isAdmin) {
+    kb.text("🛠 管理员控制台");
+  }
+  kb.row();
+  return kb.resized().persistent();
+}
+
+async function assertBotNotMaintenance(ctx: Context): Promise<void> {
+  const tgId = Number(ctx.from?.id || 0);
+  if (tgId <= 0) return;
+  await relayInternalRequest("GET", "/internal/user/profile", {
+    params: { tgId },
+  });
+}
+
+async function authorizeRoastForCtx(ctx: Context): Promise<{
+  allowed: boolean;
+  unlimited: boolean;
+  exemptReason: string | null;
+  quota: number;
+}> {
+  const { tgId, nickname, username } = getTgUserMeta(ctx);
+  if (!tgId || tgId <= 0) {
+    throw new RelayServiceError(400, "无法识别当前 Telegram 用户身份");
+  }
+  const res = await relayInternalRequest<{
+    ok: boolean;
+    data: {
+      allowed: boolean;
+      unlimited: boolean;
+      exemptReason: string | null;
+      quota: number;
+    };
+  }>("POST", "/internal/roast/authorize", {
+    json: { tgId, nickname, username },
+  });
+  return res.data;
+}
+
+async function consumeRoastForCtx(
+  ctx: Context,
+  roastType: "roast_match" | "roast_self" | "roast_mmr",
+  detail: string
+): Promise<{ consumed: boolean; unlimited: boolean; quota: number }> {
+  const { tgId } = getTgUserMeta(ctx);
+  if (!tgId || tgId <= 0) {
+    return { consumed: false, unlimited: false, quota: 0 };
+  }
+  const res = await relayInternalRequest<{
+    ok: boolean;
+    data: { consumed: boolean; unlimited: boolean; quota: number };
+  }>("POST", "/internal/roast/consume", {
+    json: { tgId, roastType, detail },
+  });
+  return res.data;
 }
 
 async function fetchAdminMe(operatorId: number): Promise<AdminMeDto> {
@@ -988,90 +1073,18 @@ async function fetchAdminMe(operatorId: number): Promise<AdminMeDto> {
   return res.data;
 }
 
-async function tryGetActiveAdmin(operatorId: number): Promise<AdminMeDto | null> {
-  if (!operatorId || operatorId <= 0) return null;
-  try {
-    return await fetchAdminMe(operatorId);
-  } catch {
-    return null;
-  }
-}
-
-async function resolveIsActiveAdminForCtx(ctx: Context): Promise<boolean> {
-  const userId = Number(ctx.from?.id || 0);
-  if (!userId || userId <= 0) return false;
-  const admin = await tryGetActiveAdmin(userId);
-  return Boolean(admin && admin.isActive);
-}
-
-/** 维护状态准入检查：维护模式下仅启用管理员/超管可放行 */
-async function assertBotNotMaintenance(ctx: Context): Promise<void> {
-  const { tgId, nickname, username } = getTgUserMeta(ctx);
-  if (!tgId || tgId <= 0) return;
-  await relayInternalRequest("POST", "/internal/user/ensure", {
-    json: { tgId, nickname, username, inviterId: null },
-  });
-}
-
-async function authorizeRoastForCtx(ctx: Context): Promise<{
-  unlimited: boolean;
-  quota: number;
-}> {
-  const { tgId, nickname, username } = getTgUserMeta(ctx);
-  if (!tgId || tgId <= 0) {
-    throw new RelayServiceError(400, "无法识别你的 Telegram 账号信息。");
-  }
-  const res = await relayInternalRequest<{
-    ok: boolean;
-    data: { allowed: boolean; unlimited: boolean; quota: number };
-  }>("POST", "/internal/roast/authorize", {
-    json: { tgId, nickname, username },
-  });
-  return {
-    unlimited: Boolean(res.data?.unlimited),
-    quota: Number(res.data?.quota ?? 0),
-  };
-}
-
-async function consumeRoastForCtx(
-  ctx: Context,
-  roastType: RoastType,
-  detail: string
-): Promise<{ consumed: boolean; unlimited: boolean; quota: number }> {
-  const { tgId } = getTgUserMeta(ctx);
-  const res = await relayInternalRequest<{
-    ok: boolean;
-    data: { consumed: boolean; unlimited: boolean; quota: number };
-  }>("POST", "/internal/roast/consume", {
-    json: { tgId, roastType, detail },
-  });
-  return {
-    consumed: Boolean(res.data?.consumed),
-    unlimited: Boolean(res.data?.unlimited),
-    quota: Number(res.data?.quota ?? 0),
-  };
+function parseStartInvitePayload(matchText: string | undefined): number | null {
+  if (!matchText) return null;
+  const trimmed = matchText.trim();
+  const m = trimmed.match(/^(?:inv_|invite_)?(\d{4,20})$/i);
+  if (!m) return null;
+  const id = Number(m[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 function buildInviteLink(tgId: number): string {
-  const botHandle = BOT_USERNAME || "ow_cn_bot";
-  return `https://t.me/${botHandle}?start=inv_${tgId}`;
-}
-
-/** 构建输入框旁常驻底部键盘（超管与管理员额外附带「🛠 管理员控制台」按钮） */
-function buildPersistentBottomKeyboard(isAdmin = false): Keyboard {
-  const kb = new Keyboard()
-    .text("👤 个人中心")
-    .text("📅 每日签到")
-    .text("🎟 兑换卡密")
-    .row()
-    .text("🇨🇳 战绩查询")
-    .text("📋 战绩流水");
-
-  if (isAdmin) {
-    kb.row().text("🛠 管理员控制台");
-  }
-
-  return kb.resized().persistent();
+  if (!BOT_USERNAME) return `邀请码：<code>${tgId}</code>`;
+  return `https://t.me/${BOT_USERNAME}?start=inv_${tgId}`;
 }
 
 function buildUserCenterView(
@@ -1082,150 +1095,118 @@ function buildUserCenterView(
   keyboard: InlineKeyboard;
 } {
   const vipStatusText = user.vipActive
-    ? `👑 VIP 会员（有效期至 ${escapeHtml(user.vipExpireAt || "")} · 锐评免限）`
-    : user.isAdmin
-      ? `👑 ${user.adminRole === "super_admin" ? "超级管理员" : "管理员"}（AI 锐评免限）`
-      : `🆓 普通用户`;
+    ? `✅ 有效（到期：<b>${escapeHtml(user.vipExpireAt || "")}</b>）`
+    : user.vipExpireAt
+      ? `⌛ 已过期（曾于 ${escapeHtml(user.vipExpireAt)} 到期）`
+      : "❌ 未开通";
 
-  const quotaText =
-    user.isAdmin || user.vipActive
-      ? `♾ 无限次（${user.isAdmin ? "管理员" : "VIP"} 免限，当前库存 ${user.quota} 次）`
-      : `<b>${user.quota}</b> 次`;
+  const roastQuotaText = user.roastUnlimited
+    ? `♾ <b>无限制</b>（${user.isAdmin ? "管理员特权" : "VIP 会员特权"} · 余额 ${user.quota} 次）`
+    : `<b>${user.quota}</b> 次`;
 
-  const displayNick = escapeHtml(user.nickname || "未设置");
-  const displayUsername = user.username
-    ? `@${escapeHtml(user.username)}`
-    : "未设置";
-  const inviteUrl = buildInviteLink(user.tgId);
+  const regRewardStr = settings
+    ? settings.registerRewardEnabled
+      ? `新用户注册送 ${settings.registerRewardQuota} 次`
+      : "新用户注册赠送已关闭"
+    : `新用户注册送 ${DEFAULT_REGISTER_QUOTA} 次`;
 
-  const invEnabled = settings ? settings.inviteRewardEnabled : true;
-  const invQuota = settings
-    ? invEnabled
-      ? settings.inviteRewardQuota
-      : 0
-    : INVITE_REWARD_QUOTA;
-  const chkEnabled = settings ? settings.checkinRewardEnabled : true;
-  const chkQuota = settings
-    ? chkEnabled
-      ? settings.checkinRewardQuota
-      : 0
-    : CHECKIN_REWARD_QUOTA;
+  const invRewardStr = settings
+    ? settings.inviteRewardEnabled
+      ? `邀请好友首次启动送 +${settings.inviteRewardQuota} 次/人`
+      : "邀请赠送已关闭"
+    : `邀请好友首次启动送 +${INVITE_REWARD_QUOTA} 次/人`;
 
-  const chkBtnLabel =
-    chkEnabled && chkQuota > 0
-      ? `📅 每日签到 (+${chkQuota}次)`
-      : `📅 每日签到`;
+  const chkRewardStr = settings
+    ? settings.checkinRewardEnabled
+      ? `每日签到可领 +${settings.checkinRewardQuota} 次`
+      : "每日签到赠送已关闭"
+    : `每日签到可领 +${CHECKIN_REWARD_QUOTA} 次`;
 
   const lines = [
-    `👤 <b>个人中心</b>`,
+    `👤 <b>个人中心 — ${escapeHtml(user.nickname || "玩家")}</b>`,
+    `🆔 TG ID：<code>${user.tgId}</code>${user.username ? `  |  @${escapeHtml(user.username)}` : ""}`,
     `━━━━━━━━━━━━━━━━━━`,
-    `🆔 <b>用户 ID：</b><code>${user.tgId}</code>`,
-    `🏷 <b>昵称：</b>${displayNick}`,
-    `📛 <b>用户名：</b>${displayUsername}`,
-    `👑 <b>会员状态：</b>${vipStatusText}`,
-    `📅 <b>注册时间：</b>${escapeHtml(user.createdAt || "未知")}`,
-    `⚡ <b>剩余锐评次数：</b>${quotaText}`,
-    `🤝 <b>已成功邀请：</b><b>${user.inviteCount}</b> 人`,
+    `⚡ <b>剩余 AI 锐评次数：</b>${roastQuotaText}`,
+    `👑 <b>VIP 会员状态：</b>${vipStatusText}`,
+    `🤝 <b>累计成功邀请：</b><b>${user.inviteCount}</b> 人`,
+    `📅 <b>今日签到状态：</b>${user.lastCheckinDate ? `最近签到 <code>${escapeHtml(user.lastCheckinDate)}</code>（北京时间 00:00 刷新）` : "尚未签到"}`,
     `━━━━━━━━━━━━━━━━━━`,
-    `🔗 <b>你的专属邀请链接：</b>`,
-    `<code>${escapeHtml(inviteUrl)}</code>`,
-    `<i>（好友通过链接首次启动机器人，新用户按当前注册规则得额度；${invEnabled && invQuota > 0 ? `邀请人立得 +${invQuota} 次` : "当前邀请赠送已关闭"}；每日 00:00 北京时间签到${chkEnabled && chkQuota > 0 ? `可领 +${chkQuota} 次` : "可完成签到"}）</i>`,
+    `🔗 <b>专属邀请链接：</b>`,
+    `<code>${escapeHtml(buildInviteLink(user.tgId))}</code>`,
+    `<i>（${escapeHtml(regRewardStr)}；${escapeHtml(invRewardStr)}；${escapeHtml(chkRewardStr)}）</i>`,
   ];
 
-  const keyboard = new InlineKeyboard()
-    .text(chkBtnLabel, "u:checkin")
+  const kb = new InlineKeyboard()
+    .text("📅 每日签到", "u:checkin")
     .text("🎟 兑换卡密", "u:redeem_prompt")
     .row()
-    .text("🔄 刷新个人中心", "u:refresh");
+    .text("🔄 刷新状态", "u:refresh");
 
   if (user.isAdmin) {
-    keyboard.row().text("🛠 管理员控制台", "u:open_admin");
+    kb.row().text("🛠 打开管理控制台", "u:open_admin");
   }
 
-  return { text: lines.join("\n"), keyboard };
+  return { text: lines.join("\n"), keyboard: kb };
 }
 
 // ============================================================================
-// 5. 数据提取、代理对清理与格式化工具
+// 5. 响应解包、安全文本清洗与工具函数
 // ============================================================================
 
-function escapeHtml(text: string): string {
-  return text
+function escapeHtml(input: string): string {
+  return input
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
+function sanitizeSafeText(raw: unknown, fieldLabel = "unknown"): string {
+  const input = String(raw ?? "");
+  const cleaned = input
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")
+    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+
+  if (cleaned !== input) {
+    console.warn("[Sanitized Unsafe Text]", {
+      field: fieldLabel,
+      originalLength: input.length,
+      cleanedLength: cleaned.length,
+    });
+  }
+  return cleaned;
+}
+
+function serializeSafeJsonBody(payload: unknown): {
+  bodyStr: string;
+  byteLength: number;
+} {
+  const bodyStr = JSON.stringify(payload, (_k, v) =>
+    typeof v === "string" ? sanitizeSafeText(v, "json-field") : v
+  );
+  return {
+    bodyStr,
+    byteLength: Buffer.byteLength(bodyStr, "utf8"),
+  };
+}
+
 function isSafeCallbackData(data: string): boolean {
   return Buffer.byteLength(data, "utf8") <= 64;
 }
 
-function sanitizeSafeText(input: unknown, fieldLabel: string): string {
-  const raw = String(input ?? "");
-  const anomalies: Array<{ index: number; codeHex: string }> = [];
-  let step1 = "";
-
-  for (let i = 0; i < raw.length; i++) {
-    const code = raw.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdfff) {
-      anomalies.push({
-        index: i,
-        codeHex: `0x${code.toString(16).toUpperCase().padStart(4, "0")}`,
-      });
-      continue;
-    }
-    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) {
-      continue;
-    }
-    step1 += raw[i];
-  }
-
-  const step2 = step1.replace(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g, "");
-
-  if (anomalies.length > 0 || step2 !== step1) {
-    console.warn(`[DeepSeek Sanitize][${fieldLabel}] 清理异常代理对:`, {
-      rawLength: raw.length,
-      surrogateCount: anomalies.length,
-      anomalies: anomalies.slice(0, 10),
-      removedEscapedSurrogates: step1.length - step2.length,
-    });
-  }
-
-  return step2;
-}
-
-function serializeSafeJsonBody(payload: Record<string, any>): {
-  bodyStr: string;
-  strippedEscapeCount: number;
-} {
-  const rawJson = JSON.stringify(payload);
-  let strippedEscapeCount = 0;
-  const cleanedJson = rawJson.replace(
-    /\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g,
-    () => {
-      strippedEscapeCount++;
-      return "";
-    }
-  );
-
-  try {
-    JSON.parse(cleanedJson);
-  } catch (parseErr) {
-    console.error("[DeepSeek JSON Self-Check Failed]", {
-      parseErr,
-      strippedEscapeCount,
-    });
-  }
-
-  return { bodyStr: cleanedJson, strippedEscapeCount };
+function unwrapData<T = any>(res: DashenResponse<T> | null | undefined): any {
+  if (!res || typeof res !== "object") return null;
+  if (res.data !== undefined && res.data !== null) return res.data;
+  if (res.result !== undefined && res.result !== null) return res.result;
+  return res;
 }
 
 function pickField(obj: any, keys: string[]): any {
   if (!obj || typeof obj !== "object") return undefined;
-  for (const key of keys) {
-    if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
-      return obj[key];
+  for (const k of keys) {
+    if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") {
+      return obj[k];
     }
   }
   return undefined;
@@ -1238,13 +1219,15 @@ function pickDeepField(obj: any, keys: string[]): any {
 
   const nestedContainers = [
     obj.matchInfo,
-    obj.match_info,
-    obj.gameInfo,
-    obj.game_info,
+    obj.matchData,
+    obj.match,
     obj.summary,
+    obj.stat,
     obj.stats,
+    obj.playerStat,
+    obj.selfStat,
     obj.detail,
-    obj.extra,
+    obj.ext,
   ];
   for (const box of nestedContainers) {
     if (box && typeof box === "object") {
@@ -1255,336 +1238,200 @@ function pickDeepField(obj: any, keys: string[]): any {
   return undefined;
 }
 
-function unwrapData<T = any>(res: DashenResponse<T>): any {
-  if (!res || typeof res !== "object") return res;
-  if (res.data !== undefined && res.data !== null) return res.data;
-  if (res.result !== undefined && res.result !== null) return res.result;
-  return res;
+function formatNum(val: unknown, decimals = 0): string {
+  if (val === undefined || val === null || val === "") return "-";
+  const num = Number(val);
+  if (Number.isNaN(num)) return escapeHtml(String(val));
+  if (decimals > 0) {
+    return num.toFixed(decimals);
+  }
+  return Math.round(num).toLocaleString("en-US");
+}
+
+function formatRate(val: unknown): string {
+  if (val === undefined || val === null || val === "") return "-";
+  const str = String(val).trim();
+  if (str.endsWith("%")) return str;
+  const num = Number(str);
+  if (Number.isNaN(num)) return escapeHtml(str);
+  const pct = num > 0 && num <= 1 ? num * 100 : num;
+  return `${pct.toFixed(1)}%`;
+}
+
+function formatTimestamp(val: unknown): string {
+  if (val === undefined || val === null || val === "") return "";
+  if (typeof val === "number") {
+    const ms = val < 1e12 ? val * 1000 : val;
+    const d = new Date(ms);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toISOString().replace("T", " ").slice(0, 16);
+    }
+  }
+  const s = String(val).trim();
+  if (/^\d{10,13}$/.test(s)) {
+    const ms = Number(s) < 1e12 ? Number(s) * 1000 : Number(s);
+    const d = new Date(ms);
+    if (!Number.isNaN(d.getTime())) {
+      return d.toISOString().replace("T", " ").slice(0, 16);
+    }
+  }
+  return s.slice(0, 16);
 }
 
 function extractPlayerFromSearch(
-  bnetInput: string,
-  res: DashenResponse
+  inputBnet: string,
+  searchRes: DashenResponse
 ): {
   bnet: string;
   customerToken: string;
   nickname: string;
-  raw: any;
 } {
-  const body = unwrapData(res);
-  const candidates: any[] = [];
+  const normalizedInput = inputBnet.replace("＃", "#").trim();
+  const data = unwrapData(searchRes);
 
-  if (Array.isArray(body)) {
-    candidates.push(...body);
-  } else if (body && typeof body === "object") {
-    for (const k of ["list", "accounts", "players", "data", "result", "items"]) {
-      if (Array.isArray(body[k])) {
-        candidates.push(...body[k]);
+  const candidates: any[] = [];
+  if (Array.isArray(data)) {
+    candidates.push(...data);
+  } else if (data && typeof data === "object") {
+    for (const key of [
+      "list",
+      "accounts",
+      "accountList",
+      "roles",
+      "roleList",
+      "items",
+      "records",
+      "data",
+    ]) {
+      if (Array.isArray(data[key])) {
+        candidates.push(...data[key]);
       }
     }
     if (candidates.length === 0) {
-      candidates.push(body);
+      candidates.push(data);
     }
   }
 
-  const targetLower = bnetInput.replace("＃", "#").trim().toLowerCase();
-  const matched =
-    candidates.find((item) => {
-      if (!item || typeof item !== "object") return false;
-      const tag = String(
+  for (const item of candidates) {
+    if (!item || typeof item !== "object") continue;
+    const token = pickField(item, [
+      "customerToken",
+      "customer_token",
+      "token",
+      "userToken",
+      "roleToken",
+      "playerToken",
+      "guid",
+      "roleId",
+      "id",
+    ]);
+    if (token) {
+      const nick = String(
         pickField(item, [
           "bnetName",
           "battleTag",
-          "bnet",
-          "name",
-          "nickName",
+          "battle_tag",
           "nickname",
-        ]) || ""
-      )
-        .trim()
-        .toLowerCase();
-      return tag === targetLower;
-    }) || candidates[0];
-
-  const customerToken = matched
-    ? pickField(matched, [
-        "customerToken",
-        "customer_token",
-        "token",
-        "playerToken",
-        "targetToken",
-      ])
-    : undefined;
-
-  if (!customerToken) {
-    throw new DashenError(
-      404,
-      `❌ 未找到国服战网账号 <code>${escapeHtml(bnetInput)}</code>，或该账号尚未在网易大神同步过战绩。`
-    );
+          "nickName",
+          "name",
+          "roleName",
+        ]) || normalizedInput
+      );
+      return {
+        bnet: normalizedInput,
+        customerToken: String(token),
+        nickname: nick,
+      };
+    }
   }
 
-  const nickname = String(
-    pickField(matched, [
-      "bnetName",
-      "battleTag",
-      "nickname",
-      "nickName",
-      "name",
-    ]) || bnetInput
+  throw new DashenError(
+    404,
+    `🔍 未查询到国服战网账号 <code>${escapeHtml(normalizedInput)}</code>，请确认战网昵称与数字编号是否正确（例如：<code>玩家昵称#51234</code>），且该账号已在国服《守望先锋 2》有数据记录。`
   );
-
-  return {
-    bnet: bnetInput.replace("＃", "#").trim(),
-    customerToken: String(customerToken),
-    nickname,
-    raw: matched,
-  };
-}
-
-function formatNum(val: any, decimals = 0): string {
-  const n = Number(val);
-  if (val === undefined || val === null || val === "" || Number.isNaN(n)) {
-    return "-";
-  }
-  if (decimals > 0) return n.toFixed(decimals);
-  return Math.round(n).toLocaleString("en-US");
-}
-
-function formatRate(val: any): string {
-  if (val === undefined || val === null || val === "") return "-";
-  const str = String(val).trim();
-  if (str.endsWith("%")) return escapeHtml(str);
-  const num = Number(str);
-  if (Number.isNaN(num)) return escapeHtml(str);
-  return `${num.toFixed(1)}%`;
-}
-
-function formatTimestamp(ts: any): string {
-  if (ts === undefined || ts === null || ts === "") return "";
-  let ms = Number(ts);
-  if (!Number.isFinite(ms) || ms <= 0) {
-    const parsed = Date.parse(String(ts));
-    if (!Number.isFinite(parsed) || parsed <= 0) return "";
-    ms = parsed;
-  } else if (ms < 1e12) {
-    ms *= 1000;
-  }
-  const d = new Date(ms);
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  const hour = String(d.getHours()).padStart(2, "0");
-  const minute = String(d.getMinutes()).padStart(2, "0");
-  return `${month}-${day} ${hour}:${minute}`;
-}
-
-function parseMatchResultBadge(m: any): string {
-  const rawResult = pickDeepField(m, [
-    "matchRet",
-    "result",
-    "win",
-    "isWin",
-    "is_win",
-    "winFlag",
-    "win_flag",
-    "matchResult",
-    "match_result",
-    "battleResult",
-    "battle_result",
-    "gameResult",
-    "outcome",
-    "status",
-  ]);
-
-  const teamScoreNum = Number(pickDeepField(m, ["teamScore", "myScore"]));
-  const oppScoreNum = Number(pickDeepField(m, ["opponentScore", "enemyScore"]));
-  const hasValidScores =
-    Number.isFinite(teamScoreNum) &&
-    Number.isFinite(oppScoreNum) &&
-    teamScoreNum !== oppScoreNum;
-
-  if (typeof rawResult === "boolean") {
-    return rawResult ? "🟢胜" : "🔴负";
-  }
-
-  if (typeof rawResult === "number") {
-    if (rawResult === 1) return "🟢胜";
-    if (rawResult === -1) return "🔴负";
-    if (rawResult === 0) {
-      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
-      return "⚪平";
-    }
-    if (rawResult === 2) {
-      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
-      return "🔴负";
-    }
-    if (rawResult === 3) return "⚪平";
-  }
-
-  if (rawResult !== undefined && rawResult !== null && rawResult !== "") {
-    const s = String(rawResult).trim().toLowerCase();
-    if (["1", "true", "win", "won", "victory", "胜", "胜利"].includes(s)) {
-      return "🟢胜";
-    }
-    if (
-      ["-1", "false", "lose", "lost", "loss", "defeat", "负", "失败"].includes(
-        s
-      )
-    ) {
-      return "🔴负";
-    }
-    if (["0", "2"].includes(s)) {
-      if (hasValidScores) return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
-      return s === "0" ? "⚪平" : "🔴负";
-    }
-    if (["3", "draw", "tie", "平", "平局"].includes(s)) {
-      return "⚪平";
-    }
-  }
-
-  if (hasValidScores) {
-    return teamScoreNum > oppScoreNum ? "🟢胜" : "🔴负";
-  }
-
-  return "⚪平";
 }
 
 function parseMatchMapName(m: any): string {
-  const mapVal = pickDeepField(m, [
+  const direct = pickDeepField(m, [
     "mapName",
     "map_name",
     "mapCnName",
-    "map_cn_name",
-    "battleMapName",
-    "sceneName",
-    "scene_name",
-    "stageName",
+    "cnMapName",
     "mapTitle",
   ]);
+  if (direct) return String(direct);
 
-  if (typeof mapVal === "string" && mapVal.trim()) {
-    return mapVal.trim();
-  }
-  if (mapVal && typeof mapVal === "object") {
-    const nestedName = pickField(mapVal, [
-      "name",
-      "mapName",
-      "cnName",
-      "title",
-    ]);
-    if (nestedName) return String(nestedName);
-  }
-
-  const mapGuid = pickDeepField(m, ["mapGuid", "map_guid", "mapId"]);
+  const mapGuid = pickDeepField(m, ["mapGuid", "mapId", "map_id", "map"]);
   if (mapGuid !== undefined) {
     return resolveDashenMapGuid(mapGuid);
   }
-
-  const modeVal = pickDeepField(m, [
-    "gameModeName",
-    "modeName",
-    "subModeName",
-    "gameMode",
-  ]);
-  if (typeof modeVal === "string" && modeVal.trim()) {
-    return `${translateModeCode(modeVal)}对局`;
-  }
-
-  return "未标注地图";
+  return "未知地图";
 }
 
 function parseMatchHeroLabel(m: any): string {
-  const heroVal = pickDeepField(m, [
+  const heroList = pickDeepField(m, ["heroList", "heroes", "useHeroes"]);
+  if (Array.isArray(heroList) && heroList.length > 0) {
+    const names = heroList
+      .map((h) =>
+        resolveDashenHeroName(
+          pickField(h, [
+            "heroName",
+            "name",
+            "cnName",
+            "heroGuid",
+            "heroId",
+          ])
+        )
+      )
+      .filter(Boolean);
+    const unique = Array.from(new Set(names));
+    if (unique.length > 0) {
+      return unique.slice(0, 2).join("/");
+    }
+  }
+
+  const singleHero = pickDeepField(m, [
     "heroName",
     "hero_name",
+    "mainHero",
+    "heroGuid",
+    "heroId",
     "hero",
-    "mostHeroName",
-    "mainHeroName",
   ]);
-  if (typeof heroVal === "string" && heroVal.trim()) {
-    return resolveDashenHeroName(heroVal);
+  if (singleHero !== undefined) {
+    return resolveDashenHeroName(singleHero);
   }
-
-  const heroGuid = pickDeepField(m, ["heroGuid", "hero_guid", "heroId"]);
-  if (heroGuid !== undefined) {
-    return resolveDashenHeroGuid(heroGuid);
-  }
-
   return "";
 }
 
-const matchCache = new Map<
-  string,
-  {
-    bnet: string;
-    customerToken: string;
-    matchId: string;
-    mode: CnGameMode;
-    page: number;
-    expiresAt: number;
-  }
->();
+function parseMatchResultBadge(m: any): string {
+  const rawRes = pickDeepField(m, [
+    "matchResult",
+    "result",
+    "isWin",
+    "win",
+    "outcome",
+    "battleResult",
+  ]);
+  if (rawRes === true || rawRes === 1 || rawRes === "1") return "🟢胜";
+  if (rawRes === false || rawRes === 0 || rawRes === "0") return "🔴负";
 
-const profileContextCache = new Map<
-  string,
-  {
-    bnet: string;
-    customerToken: string;
-    mode: CnGameMode;
-    snapshotText: string;
-    currentRankLabel: string;
-    expiresAt: number;
+  if (typeof rawRes === "string") {
+    const s = rawRes.trim().toLowerCase();
+    if (["win", "victory", "胜", "胜利"].includes(s)) return "🟢胜";
+    if (["loss", "lose", "defeat", "负", "失败"].includes(s)) return "🔴负";
+    if (["draw", "tie", "平", "平局"].includes(s)) return "⚪平";
   }
->();
 
-/** 缓存单局详情引用，记录来源页码以便返回战绩列表时精准回到原页 */
-function cacheMatchRef(
-  bnet: string,
-  customerToken: string,
-  matchId: string,
-  mode: CnGameMode,
-  page = 1
-): string {
-  const shortId = `${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 6)}`;
-  matchCache.set(shortId, {
-    bnet,
-    customerToken,
-    matchId,
-    mode,
-    page: Math.max(1, Number(page) || 1),
-    expiresAt: Date.now() + 15 * 60 * 1000,
-  });
-  if (matchCache.size > 200) {
-    const now = Date.now();
-    for (const [k, v] of matchCache.entries()) {
-      if (v.expiresAt < now) matchCache.delete(k);
-    }
+  const myScore = Number(pickDeepField(m, ["teamScore", "myScore"]));
+  const oppScore = Number(pickDeepField(m, ["opponentScore", "enemyScore"]));
+  if (!Number.isNaN(myScore) && !Number.isNaN(oppScore)) {
+    if (myScore > oppScore) return "🟢胜";
+    if (myScore < oppScore) return "🔴负";
+    return "⚪平";
   }
-  return shortId;
-}
 
-function cacheProfileContext(
-  bnet: string,
-  customerToken: string,
-  mode: CnGameMode,
-  snapshotText: string,
-  currentRankLabel = "未定级"
-): string {
-  const shortId = `p${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 5)}`;
-  profileContextCache.set(shortId, {
-    bnet,
-    customerToken,
-    mode,
-    snapshotText,
-    currentRankLabel,
-    expiresAt: Date.now() + 30 * 60 * 1000,
-  });
-  if (profileContextCache.size > 200) {
-    const now = Date.now();
-    for (const [k, v] of profileContextCache.entries()) {
-      if (v.expiresAt < now) profileContextCache.delete(k);
-    }
-  }
-  return shortId;
+  return "⚪局";
 }
 
 // ============================================================================
@@ -1776,7 +1623,8 @@ async function callDeepSeekJson(
 async function generateDeepSeekMatchReview(
   bnet: string,
   customerToken: string,
-  matchId: string
+  matchId: string,
+  operatorNickname = ""
 ): Promise<string> {
   const cacheKey = `match:${matchId.trim()}:${bnet.trim().toLowerCase()}`;
   const cachedHtml = await getRoastCache(cacheKey, "match");
@@ -1923,6 +1771,7 @@ async function generateDeepSeekMatchReview(
     roastType: "match",
     bnet,
     matchId,
+    operatorNickname,
     reviewHtml,
   });
 
@@ -1932,7 +1781,8 @@ async function generateDeepSeekMatchReview(
 async function generateDeepSeekProfileRoast(
   bnet: string,
   mode: CnGameMode,
-  snapshotText: string
+  snapshotText: string,
+  operatorNickname = ""
 ): Promise<string> {
   const cacheKey = `self:${mode}:${bnet.trim().toLowerCase()}`;
   const cachedHtml = await getRoastCache(cacheKey, "self");
@@ -1987,6 +1837,7 @@ async function generateDeepSeekProfileRoast(
     roastType: "self",
     gameMode: mode,
     bnet,
+    operatorNickname,
     reviewHtml,
   });
 
@@ -2030,7 +1881,8 @@ async function generateDeepSeekMmrEvaluation(
   bnet: string,
   mode: CnGameMode,
   snapshotText: string,
-  currentRankLabel = "未定级"
+  currentRankLabel = "未定级",
+  operatorNickname = ""
 ): Promise<string> {
   const cacheKey = `mmr:${mode}:${bnet.trim().toLowerCase()}`;
   const cachedHtml = await getRoastCache(cacheKey, "mmr");
@@ -2086,6 +1938,7 @@ async function generateDeepSeekMmrEvaluation(
     roastType: "mmr",
     gameMode: mode,
     bnet,
+    operatorNickname,
     reviewHtml,
   });
 
@@ -2095,6 +1948,81 @@ async function generateDeepSeekMmrEvaluation(
 // ============================================================================
 // 6. 视图渲染：国服总览卡片 / 近期战绩列表 / 单场对局详情
 // ============================================================================
+
+const matchCache = new Map<
+  string,
+  {
+    bnet: string;
+    customerToken: string;
+    matchId: string;
+    mode: CnGameMode;
+    page: number;
+    expiresAt: number;
+  }
+>();
+
+const profileContextCache = new Map<
+  string,
+  {
+    bnet: string;
+    customerToken: string;
+    mode: CnGameMode;
+    snapshotText: string;
+    currentRankLabel: string;
+    expiresAt: number;
+  }
+>();
+
+/** 缓存单局详情引用，记录来源页码以便返回战绩列表时精准回到原页 */
+function cacheMatchRef(
+  bnet: string,
+  customerToken: string,
+  matchId: string,
+  mode: CnGameMode,
+  page = 1
+): string {
+  const shortId = `${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 6)}`;
+  matchCache.set(shortId, {
+    bnet,
+    customerToken,
+    matchId,
+    mode,
+    page: Math.max(1, Number(page) || 1),
+    expiresAt: Date.now() + 15 * 60 * 1000,
+  });
+  if (matchCache.size > 200) {
+    const now = Date.now();
+    for (const [k, v] of matchCache.entries()) {
+      if (v.expiresAt < now) matchCache.delete(k);
+    }
+  }
+  return shortId;
+}
+
+function cacheProfileContext(
+  bnet: string,
+  customerToken: string,
+  mode: CnGameMode,
+  snapshotText: string,
+  currentRankLabel = "未定级"
+): string {
+  const shortId = `p${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 5)}`;
+  profileContextCache.set(shortId, {
+    bnet,
+    customerToken,
+    mode,
+    snapshotText,
+    currentRankLabel,
+    expiresAt: Date.now() + 30 * 60 * 1000,
+  });
+  if (profileContextCache.size > 200) {
+    const now = Date.now();
+    for (const [k, v] of profileContextCache.entries()) {
+      if (v.expiresAt < now) profileContextCache.delete(k);
+    }
+  }
+  return shortId;
+}
 
 async function buildCnOverviewView(
   bnet: string,
@@ -3985,6 +3913,7 @@ bot.on("callback_query:data", async (ctx) => {
 
       const auth = await authorizeRoastForCtx(ctx);
       await safeAnswerCallback(ctx, "正在生成 AI 分析...");
+      const operatorNickname = getOperatorDisplayLabel(ctx);
       const titleLabel =
         rKind === "mmr" ? "隐性段位评估" : "个人赛季锐评";
       const loadingMsg = await ctx.reply(
@@ -3999,12 +3928,14 @@ bot.on("callback_query:data", async (ctx) => {
                 pEntry.bnet,
                 pEntry.mode,
                 pEntry.snapshotText,
-                pEntry.currentRankLabel
+                pEntry.currentRankLabel,
+                operatorNickname
               )
             : await generateDeepSeekProfileRoast(
                 pEntry.bnet,
                 pEntry.mode,
-                pEntry.snapshotText
+                pEntry.snapshotText,
+                operatorNickname
               );
 
         const consumeRes = await consumeRoastForCtx(
@@ -4053,6 +3984,7 @@ bot.on("callback_query:data", async (ctx) => {
 
       const auth = await authorizeRoastForCtx(ctx);
       await safeAnswerCallback(ctx, "正在呼叫 DeepSeek 生成锐评...");
+      const operatorNickname = getOperatorDisplayLabel(ctx);
       const loadingMsg = await ctx.reply(
         `🤖 正在分析 <b>${escapeHtml(sanitizeSafeText(cached.bnet, "loading-bnet"))}</b> 的本局数据并生成 DeepSeek 锐评，请稍候...`,
         { parse_mode: "HTML" }
@@ -4061,7 +3993,8 @@ bot.on("callback_query:data", async (ctx) => {
         const reviewText = await generateDeepSeekMatchReview(
           cached.bnet,
           cached.customerToken,
-          cached.matchId
+          cached.matchId,
+          operatorNickname
         );
         const consumeRes = await consumeRoastForCtx(
           ctx,
