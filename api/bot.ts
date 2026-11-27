@@ -1686,7 +1686,7 @@ function pickAiText(parsed: any, keys: string[]): string {
   return "";
 }
 
-// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek），完整等待响应并记录原始日志
+// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek），完整等待响应并记录请求体与原始返回日志
 async function callAiProviderJson(
   systemPrompt: string,
   userPrompt: string,
@@ -1709,13 +1709,26 @@ async function callAiProviderJson(
     ? effectiveBaseUrl
     : `${effectiveBaseUrl}/chat/completions`;
 
-  const { bodyStr: requestBodyStr } = serializeSafeJsonBody({
+  const cleanSys = sanitizeSafeText(systemPrompt, "sys");
+  const cleanUsr = sanitizeSafeText(userPrompt, "usr");
+  const { bodyStr: requestBodyStr, byteLength: requestBodyBytes } =
+    serializeSafeJsonBody({
+      model: effectiveModel,
+      temperature: 0.25,
+      messages: [
+        { role: "system", content: cleanSys },
+        { role: "user", content: cleanUsr },
+      ],
+    });
+
+  // 记录实际发送的请求体摘要与完整 userPrompt（便于直接提取到 Apifox 复现调试）
+  console.info("[AI Provider Request Payload]", {
+    provider: logProviderName,
     model: effectiveModel,
-    temperature: 0.25,
-    messages: [
-      { role: "system", content: sanitizeSafeText(systemPrompt, "sys") },
-      { role: "user", content: sanitizeSafeText(userPrompt, "usr") },
-    ],
+    chatUrl,
+    requestBodyBytes,
+    systemPrompt: cleanSys,
+    userPrompt: cleanUsr,
   });
 
   let response: Response;
