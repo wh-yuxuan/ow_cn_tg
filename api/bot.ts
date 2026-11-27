@@ -2,7 +2,7 @@
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（独立部署版）
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
- * 数据来源：服务器反代 (http://106.55.101.248:18088 -> datamsapi.ds.163.com/v1/a19ld5tool) + DeepSeek AI 锐评
+ * 数据来源：Cloudflare Tunnel 反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool) + DeepSeek AI 锐评
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -26,10 +26,10 @@ const DASHEN_USER_AGENT =
   process.env.DASHEN_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-// 默认指向服务器直连反代地址 http://106.55.101.248:18088，同时支持环境变量覆盖
+// 默认指向已配置 Cloudflare Tunnel 的域名 https://ow.eyy8.top，同时支持环境变量覆盖
 const DASHEN_RELAY_ORIGIN =
   process.env.DASHEN_RELAY_ORIGIN?.replace(/\/+$/, "") ||
-  "http://106.55.101.248:18088";
+  "https://ow.eyy8.top";
 const DASHEN_API_ROOT =
   process.env.DASHEN_API_ROOT?.replace(/\/+$/, "") ||
   `${DASHEN_RELAY_ORIGIN}/v1/a19ld5tool`;
