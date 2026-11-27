@@ -1,5 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
+ * 代码生成时间：2026-11-27 21:26:00 (Asia/Shanghai)
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
  * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool)
@@ -51,11 +52,11 @@ const VERCEL_PUBLIC_ORIGIN = (
 ).replace(/\/+$/, "");
 
 const DASHEN_API_ROOT =
-  process.env.DASHEN_API_ROOT ||
+  process.env.DASHEN_API_ROOT?.replace(/\/+$/, "") ||
   `${DASHEN_RELAY_ORIGIN}/v1/a19ld5tool`;
 
 const DASHEN_CUSTOMER_API_BASE =
-  process.env.DASHEN_CUSTOMER_API_BASE ||
+  process.env.DASHEN_CUSTOMER_API_BASE?.replace(/\/+$/, "") ||
   `${DASHEN_API_ROOT}/customer`;
 
 const SEARCH_BNET_ACCOUNT_URL =
@@ -1461,19 +1462,25 @@ function extractCustomerTokenAndAccount(payload: DashenResponse): {
   if (Array.isArray(data)) {
     candidates.push(...data);
   } else if (data && typeof data === "object") {
-    candidates.push(data);
     for (const key of [
       "list",
       "accounts",
+      "accountList",
+      "roles",
+      "roleList",
       "items",
       "records",
       "rows",
       "userList",
+      "data",
       "result",
     ]) {
       if (Array.isArray(data[key])) {
         candidates.push(...data[key]);
       }
+    }
+    if (candidates.length === 0) {
+      candidates.push(data);
     }
     if (data.account && typeof data.account === "object") {
       candidates.push(data.account);
@@ -1489,21 +1496,29 @@ function extractCustomerTokenAndAccount(payload: DashenResponse): {
   for (const item of candidates) {
     if (!item || typeof item !== "object") continue;
     const token = pickField(item, [
-      "token",
       "customerToken",
       "customer_token",
+      "token",
       "userToken",
+      "roleToken",
+      "playerToken",
       "accessToken",
+      "guid",
+      "roleId",
       "id",
     ]);
     if (token !== undefined && token !== null && String(token).trim() !== "") {
       const matchedBnet =
         pickField(item, [
+          "bnetName",
           "battleTag",
+          "battle_tag",
           "bnet",
-          "name",
-          "accountName",
           "nickname",
+          "nickName",
+          "name",
+          "roleName",
+          "accountName",
           "gameName",
         ]) || "";
       return {
@@ -3459,7 +3474,7 @@ bot.hears("🛠 管理员控制台", async (ctx) => {
 async function dispatchRoastWithProvider(params: {
   ctx: Context;
   rKind: RoastType;
-  arg3: string; // mode ("sport"|"leisure") 或 matchId
+  arg3: string;
   bnet: string;
   provider: AiProviderDto;
 }): Promise<void> {
@@ -3490,7 +3505,7 @@ async function dispatchRoastWithProvider(params: {
   // 2. 校验用户权限与剩余次数
   const auth = await authorizeRoastForCtx(ctx);
 
-  // 3. 并发唯一性去重锁（防止同一用户对同一目标、同一类型、同一渠道重复触发）
+  // 3. 并发唯一性去重锁
   const taskKey = `${tgId}:${rKind}:${arg3}:${bnet}:p${provider.id}`;
   if (inFlightRoastTasks.has(taskKey)) {
     await ctx.answerCallbackQuery({
@@ -3602,7 +3617,6 @@ bot.on("callback_query:data", async (ctx) => {
   const tgId = Number(ctx.from?.id || 0);
 
   try {
-    // --- 用户中心相关按钮 ---
     if (data === "u:checkin") {
       await ctx.answerCallbackQuery();
       await handleCheckinCommand(ctx);
@@ -3659,7 +3673,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 战绩总览模式切换 ---
     if (data.startsWith("cn:sw:")) {
       await ctx.answerCallbackQuery({ text: "正在切换模式..." });
       const rest = data.slice("cn:sw:".length);
@@ -3670,7 +3683,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 战绩流水列表翻页 ---
     if (data.startsWith("cn:ml:")) {
       await ctx.answerCallbackQuery({ text: "正在加载战绩流水..." });
       const parts = data.split(":");
@@ -3681,7 +3693,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 单局详情查看 ---
     if (data.startsWith("cn:md:")) {
       await ctx.answerCallbackQuery({ text: "正在加载对局详情..." });
       const parts = data.split(":");
@@ -3707,7 +3718,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 点击锐评按钮：若多渠道则原地展开渠道键盘，单渠道则直接执行 ---
     if (data.startsWith("cn:r:")) {
       const parts = data.split(":");
       const rKind = (parts[2] as RoastType) || "self";
@@ -3746,7 +3756,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 原地取消渠道选择，恢复原按钮 ---
     if (data.startsWith("cn:rc:")) {
       await ctx.answerCallbackQuery({ text: "已取消选择" });
       const parts = data.split(":");
@@ -3767,7 +3776,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 选定具体 AI 渠道并执行锐评 ---
     if (data.startsWith("cn:rp:")) {
       const parts = data.split(":");
       const providerId = Number(parts[2] ?? 0);
@@ -3807,7 +3815,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 管理员控制台回调 ---
     if (data === "ad:home") {
       await ctx.answerCallbackQuery();
       await renderAdminHomePanel(ctx, true);
@@ -3954,7 +3961,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- AI 锐评渠道与执行节点管理（超管） ---
     if (data === "ad:ai_list") {
       await ctx.answerCallbackQuery();
       await renderAiProvidersPanel(ctx, true);
@@ -4024,7 +4030,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 系统与赠送设置（超管） ---
     if (data === "ad:settings") {
       await ctx.answerCallbackQuery();
       const res = await relayInternalRequest<{
@@ -4121,7 +4126,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 管理员列表与权限管理（超管） ---
     if (data === "ad:admins") {
       await ctx.answerCallbackQuery();
       const res = await relayInternalRequest<{
@@ -4238,7 +4242,6 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
-    // --- 操作审计日志（超管，仅展示操作人昵称） ---
     if (data.startsWith("ad:logs:")) {
       await ctx.answerCallbackQuery();
       const page = Math.max(1, Number(data.split(":")[2] || 1));
@@ -4718,6 +4721,7 @@ export default async function handler(
       JSON.stringify({
         ok: true,
         service: "ow2-cn-tg-bot",
+        generatedAt: "2026-11-27 21:26:00",
         dockerCallbackEnabled: true,
       })
     );
