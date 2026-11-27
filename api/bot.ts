@@ -66,7 +66,11 @@ const AI_BASE_URL = (
 ).replace(/\/+$/, "");
 const AI_API_KEY = (process.env.AI_API_KEY || "").trim();
 const AI_MODEL = (process.env.AI_MODEL || "deepseek-chat").trim();
-const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || "25000");
+// 放宽 AI 超时等待上限（默认 55 秒），便于推理/Pro 模型完整完成思考并返回结果
+const AI_TIMEOUT_MS = Math.max(
+  Number(process.env.AI_TIMEOUT_MS || "55000") || 55000,
+  45000
+);
 
 const API_TIMEOUT_MS = 12_000;
 const RELAY_TIMEOUT_MS = 12_000;
@@ -1682,7 +1686,7 @@ function pickAiText(parsed: any, keys: string[]): string {
   return "";
 }
 
-// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek），并记录原始响应日志便于排查
+// 支持传入动态 AI 渠道配置（未传时自动降级为 Vercel 环境变量中的 DeepSeek），完整等待响应并记录原始日志
 async function callAiProviderJson(
   systemPrompt: string,
   userPrompt: string,
@@ -1734,12 +1738,13 @@ async function callAiProviderJson(
       provider: logProviderName,
       model: effectiveModel,
       chatUrl,
+      timeoutMs: AI_TIMEOUT_MS,
       err,
     });
     throw new DashenError(
       504,
       isTimeout
-        ? `⏳ ${providerLabel} 生成锐评超时，请稍后再试。`
+        ? `⏳ ${providerLabel} 思考/生成超时（已等待 ${Math.round(AI_TIMEOUT_MS / 1000)}s），请稍后再试。`
         : `🌐 请求 ${providerLabel} 接口网络异常，请稍后再试。`
     );
   }
@@ -1774,12 +1779,20 @@ async function callAiProviderJson(
   const firstChoice =
     aiPayload?.choices?.[0] ?? aiPayload?.data?.choices?.[0] ?? null;
   const msgObj = firstChoice?.message ?? firstChoice?.delta ?? null;
-  const contentCandidate =
-    msgObj?.content ??
-    aiPayload?.output_text ??
-    aiPayload?.data?.output_text ??
-    firstChoice?.text ??
+  const reasoningCandidate =
     msgObj?.reasoning_content ??
+    msgObj?.reasoning ??
+    msgObj?.thought ??
+    aiPayload?.reasoning_content ??
+    aiPayload?.reasoning ??
+    "";
+  const contentCandidate =
+    msgObj?.content ||
+    aiPayload?.output_text ||
+    aiPayload?.data?.output_text ||
+    aiPayload?.response?.output_text ||
+    firstChoice?.text ||
+    reasoningCandidate ||
     "";
   const contentStr =
     typeof contentCandidate === "string"
@@ -1792,7 +1805,7 @@ async function callAiProviderJson(
     httpStatus: response.status,
     finishReason: firstChoice?.finish_reason ?? aiPayload?.finish_reason ?? "",
     hasContent: Boolean(msgObj?.content),
-    hasReasoningContent: Boolean(msgObj?.reasoning_content),
+    hasReasoningContent: Boolean(reasoningCandidate),
     contentSnippet: sanitizeSafeText(contentStr, "ai-content-log").slice(0, 600),
     payloadSnippet: sanitizeSafeText(rawRespText, "ai-payload-log").slice(0, 800),
   });
