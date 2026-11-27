@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-27 23:55:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 00:10:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -115,9 +115,9 @@ type PendingUserAction =
   | { type: "super_setting_inv_quota" }
   | { type: "super_setting_chk_quota" }
   | { type: "super_ai_provider_add" }
-  | { type: "super_ai_provider_key"; providerId: number }
-  | { type: "super_dashen_account_add" }
-  | { type: "super_dashen_account_edit"; accountId: number };
+  | { type: "super_ai_provider_key"; providerId: number; promptMessageId?: number }
+  | { type: "super_dashen_account_add"; promptMessageId?: number }
+  | { type: "super_dashen_account_edit"; accountId: number; promptMessageId?: number };
 
 const pendingUserInputs = new Map<
   number,
@@ -4182,17 +4182,21 @@ bot.on("callback_query:data", async (ctx) => {
     if (data.startsWith("ad:ai_key:")) {
       await ctx.answerCallbackQuery();
       const providerId = Number(data.split(":")[2] || 0);
+      const sentPrompt = await ctx.reply(
+        `🔑 <b>修改 AI 渠道 #${providerId} 的密钥</b>\n` +
+          `请直接发送新的 API Key（保存成功后将自动删除你发送的密钥消息并显示脱敏结果）：`,
+        { parse_mode: "HTML" }
+      );
       if (tgId > 0 && providerId > 0) {
         pendingUserInputs.set(tgId, {
-          action: { type: "super_ai_provider_key", providerId },
+          action: {
+            type: "super_ai_provider_key",
+            providerId,
+            promptMessageId: sentPrompt.message_id,
+          },
           expiresAt: Date.now() + 3 * 60 * 1000,
         });
       }
-      await ctx.reply(
-        `🔑 <b>修改 AI 渠道 #${providerId} 的密钥</b>\n` +
-          `请直接发送新的 API Key（更新后将自动脱敏展示，建议更新完成后删除包含明文 Key 的聊天消息以防留痕）：`,
-        { parse_mode: "HTML" }
-      );
       return;
     }
 
@@ -4204,32 +4208,39 @@ bot.on("callback_query:data", async (ctx) => {
 
     if (data === "ad:ds_add") {
       await ctx.answerCallbackQuery();
-      pendingUserInputs.set(tgId, {
-        action: { type: "super_dashen_account_add" },
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      });
-      await ctx.reply(
+      const sentPrompt = await ctx.reply(
         `➕ <b>新增网易大神轮询账号</b>\n` +
-          `请直接粘贴抓包复制的<strong>整段请求头文本</strong>（可选首行写 <code>备注: 小号名称</code>）：\n` +
+          `请直接粘贴抓包复制的<strong>整段请求头文本</strong>（保存成功后将自动删除你发送的请求头消息，可选首行写 <code>备注: 小号名称</code>）：\n` +
           `• 自动提取 <code>GL-Bigdata-Auth-Token</code>、<code>GL-Bigdata-Role-Id</code>、<code>GL-Bigdata-Dts</code>、<code>GL-Bigdata-Server</code>、<code>GL-ClientType</code>、<code>Origin</code>、<code>Referer</code>、<code>User-Agent</code>\n` +
           `• <b>不会存储 Cookie</b>`,
         { parse_mode: "HTML" }
       );
+      pendingUserInputs.set(tgId, {
+        action: {
+          type: "super_dashen_account_add",
+          promptMessageId: sentPrompt.message_id,
+        },
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
       return;
     }
 
     if (data.startsWith("ad:ds_edit:")) {
       await ctx.answerCallbackQuery();
       const accountId = Number(data.split(":")[2] || 0);
-      pendingUserInputs.set(tgId, {
-        action: { type: "super_dashen_account_edit", accountId },
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      });
-      await ctx.reply(
+      const sentPrompt = await ctx.reply(
         `✏️ <b>修改大神轮询账号 #${accountId}</b>\n` +
-          `请粘贴新的<strong>整段请求头文本</strong>（可选首行写 <code>备注: 新名称</code>），机器人将自动提取覆盖该账号参数。`,
+          `请粘贴新的<strong>整段请求头文本</strong>（保存成功后将自动删除你发送的请求头消息，可选首行写 <code>备注: 新名称</code>）：`,
         { parse_mode: "HTML" }
       );
+      pendingUserInputs.set(tgId, {
+        action: {
+          type: "super_dashen_account_edit",
+          accountId,
+          promptMessageId: sentPrompt.message_id,
+        },
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
       return;
     }
 
@@ -4950,11 +4961,18 @@ bot.on("message:text", async (ctx, next) => {
         json: { providerId: act.providerId, apiKey: cleanKey },
       });
       const d = res.data;
+
+      // 保存成功后自动删除用户发送的明文密钥消息及机器人提示消息
+      await ctx.deleteMessage().catch(() => {});
+      const chatId = Number(ctx.chat?.id || ctx.from?.id || 0);
+      if (chatId && act.promptMessageId) {
+        await ctx.api.deleteMessage(chatId, act.promptMessageId).catch(() => {});
+      }
+
       await ctx.reply(
-        `✅ <b>已更新 AI 渠道密钥</b>\n` +
+        `✅ <b>密钥更改成功</b>\n` +
           `• 渠道：<b>${escapeHtml(d.name)}</b>（#${d.id}）\n` +
-          `• 脱敏 Key：<code>${escapeHtml(d.maskedKey || "")}</code>\n` +
-          `<i>提示：为避免密钥明文留存在聊天记录中，建议顺手删除你刚才发送的那条密钥消息。</i>`,
+          `• 脱敏 Key：<code>${escapeHtml(d.maskedKey || "")}</code>`,
         { parse_mode: "HTML" }
       );
       return;
@@ -4991,11 +5009,24 @@ bot.on("message:text", async (ctx, next) => {
       );
 
       const d = saveRes.data;
+      const maskedTokenPreview =
+        parsedRes.parsed.authToken.length > 8
+          ? `${parsedRes.parsed.authToken.slice(0, 6)}****${parsedRes.parsed.authToken.slice(-4)}`
+          : "已配置";
+
+      // 保存成功后自动删除用户发送的含凭证请求头消息及机器人提示消息
+      await ctx.deleteMessage().catch(() => {});
+      const chatId = Number(ctx.chat?.id || ctx.from?.id || 0);
+      if (chatId && act.promptMessageId) {
+        await ctx.api.deleteMessage(chatId, act.promptMessageId).catch(() => {});
+      }
+
       await ctx.reply(
         `✅ <b>已${act.type === "super_dashen_account_edit" ? "更新" : "新增"}网易大神轮询账号</b>\n` +
           `• 账号编号：<b>#${d.id}</b>\n` +
           `• 名称/备注：<b>${escapeHtml(parsedRes.parsed.name)}</b>\n` +
           `• Role ID：<code>${parsedRes.parsed.roleId}</code>\n` +
+          `• Token（脱敏）：<code>${escapeHtml(maskedTokenPreview)}</code>\n` +
           `• ClientType：<code>${escapeHtml(parsedRes.parsed.clientType)}</code> | dts：<code>${parsedRes.parsed.dts}</code> | server：<code>${parsedRes.parsed.server}</code>\n` +
           `• User-Agent：已存储（<code>${escapeHtml(parsedRes.parsed.userAgent.slice(0, 42))}${parsedRes.parsed.userAgent.length > 42 ? "..." : ""}</code>）\n` +
           `• Cookie：<i>按方案未存储</i>`,
@@ -5078,7 +5109,7 @@ export default async function handler(
       JSON.stringify({
         ok: true,
         service: "ow2-cn-tg-bot",
-        generatedAt: "2026-11-27 23:55:00",
+        generatedAt: "2026-11-28 00:10:00",
         dockerCallbackEnabled: true,
       })
     );
