@@ -5791,11 +5791,3 @@ export default async function handler(
 
   await handleWebhook(req, res);
 }
-```
-
-### 部署与测试说明
-1. **上传部署**：将以上完整代码覆盖 `api/bot.ts` 并部署到 Vercel。
-2. **切换渠道节点**：私聊机器人打开 `/admin` -> `🤖 AI 锐评渠道`，把 `deepseek-v4-pro` 点 **`🔁 切为 Docker`**（默认新增渠道仍为 `vercel`，超管可随时切换）。
-3. **验证链路**：
-   - 用户点击锐评后，Vercel 秒级入队并显示 `⏳ 已进入 Docker 计算队列` 以及 `📍 当前前方还有 X 人/任务在等待`（并发 2、超时 120s）；
-   - Docker 思考完成后自动回推给 Vercel 的 `/api/bot?action=docker_callback`，由 Vercel 完成写缓存、扣次并自动把最终锐评结果编辑更新到原消息中。
