@@ -22,7 +22,11 @@ import {
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-const BOT_USERNAME = (process.env.BOT_USERNAME || "").replace(/^@+/, "").trim();
+const ENV_BOT_USERNAME = (process.env.BOT_USERNAME || "")
+  .replace(/^@+/, "")
+  .trim();
+
+let runtimeBotUsername = ENV_BOT_USERNAME;
 
 const DASHEN_ROLE_ID = Number(process.env.DASHEN_ROLE_ID || "0");
 const DASHEN_TOKEN = (process.env.DASHEN_TOKEN || "").trim();
@@ -1064,6 +1068,30 @@ async function consumeRoastForCtx(
   return res.data;
 }
 
+async function resolveBotUsernameForCtx(ctx: Context): Promise<string> {
+  if (runtimeBotUsername) return runtimeBotUsername;
+  const fromMe = String(ctx.me?.username || "")
+    .replace(/^@+/, "")
+    .trim();
+  if (fromMe) {
+    runtimeBotUsername = fromMe;
+    return fromMe;
+  }
+  try {
+    const meInfo = await ctx.api.getMe();
+    const fetched = String(meInfo?.username || "")
+      .replace(/^@+/, "")
+      .trim();
+    if (fetched) {
+      runtimeBotUsername = fetched;
+      return fetched;
+    }
+  } catch {
+    // 忽略获取 Bot 用户名失败，降级使用邀请码
+  }
+  return "";
+}
+
 async function fetchAdminMe(operatorId: number): Promise<AdminMeDto> {
   const res = await relayInternalRequest<{ ok: boolean; data: AdminMeDto }>(
     "GET",
@@ -1082,14 +1110,18 @@ function parseStartInvitePayload(matchText: string | undefined): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-function buildInviteLink(tgId: number): string {
-  if (!BOT_USERNAME) return `邀请码：<code>${tgId}</code>`;
-  return `https://t.me/${BOT_USERNAME}?start=inv_${tgId}`;
+function buildInviteLink(tgId: number, botUsername?: string): string {
+  const uname = (botUsername || runtimeBotUsername || ENV_BOT_USERNAME || "")
+    .replace(/^@+/, "")
+    .trim();
+  if (!uname) return `inv_${tgId}`;
+  return `https://t.me/${uname}?start=inv_${tgId}`;
 }
 
 function buildUserCenterView(
   user: UserProfileDto,
-  settings?: SystemSettingsDto
+  settings?: SystemSettingsDto,
+  botUsername?: string
 ): {
   text: string;
   keyboard: InlineKeyboard;
@@ -1122,6 +1154,9 @@ function buildUserCenterView(
       : "每日签到赠送已关闭"
     : `每日签到可领 +${CHECKIN_REWARD_QUOTA} 次`;
 
+  const inviteTarget = buildInviteLink(user.tgId, botUsername);
+  const isFullInviteUrl = /^https:\/\/t\.me\//i.test(inviteTarget);
+
   const lines = [
     `👤 <b>个人中心 — ${escapeHtml(user.nickname || "玩家")}</b>`,
     `🆔 TG ID：<code>${user.tgId}</code>${user.username ? `  |  @${escapeHtml(user.username)}` : ""}`,
@@ -1132,7 +1167,9 @@ function buildUserCenterView(
     `📅 <b>今日签到状态：</b>${user.lastCheckinDate ? `最近签到 <code>${escapeHtml(user.lastCheckinDate)}</code>（北京时间 00:00 刷新）` : "尚未签到"}`,
     `━━━━━━━━━━━━━━━━━━`,
     `🔗 <b>专属邀请链接：</b>`,
-    `<code>${escapeHtml(buildInviteLink(user.tgId))}</code>`,
+    isFullInviteUrl
+      ? `<a href="${escapeHtml(inviteTarget)}">${escapeHtml(inviteTarget)}</a>\n<code>${escapeHtml(inviteTarget)}</code>`
+      : `邀请码：<code>${escapeHtml(inviteTarget)}</code>`,
     `<i>（${escapeHtml(regRewardStr)}；${escapeHtml(invRewardStr)}；${escapeHtml(chkRewardStr)}）</i>`,
   ];
 
@@ -1140,6 +1177,7 @@ function buildUserCenterView(
     .text("📅 每日签到", "u:checkin")
     .text("🎟 兑换卡密", "u:redeem_prompt")
     .row()
+    .text("📋 复制邀请链接", "u:copy_invite")
     .text("🔄 刷新状态", "u:refresh");
 
   if (user.isAdmin) {
@@ -3326,6 +3364,7 @@ async function openUserCenter(ctx: Context, isEdit = false): Promise<void> {
     return;
   }
 
+  const botUsername = await resolveBotUsernameForCtx(ctx);
   const ensured = await ensureUserRegistered(ctx, null);
   let user = ensured.user;
   if (!user) {
@@ -3348,7 +3387,11 @@ async function openUserCenter(ctx: Context, isEdit = false): Promise<void> {
     };
   }
 
-  const { text, keyboard } = buildUserCenterView(user, ensured.settings);
+  const { text, keyboard } = buildUserCenterView(
+    user,
+    ensured.settings,
+    botUsername
+  );
   if (isEdit && ctx.callbackQuery?.message) {
     await safeEditMessage(ctx, text, keyboard);
   } else {
@@ -3832,6 +3875,24 @@ bot.on("callback_query:data", async (ctx) => {
         const { text: chkMsg } = await executeCheckin(ctx);
         await openUserCenter(ctx, true);
         await safeAnswerCallback(ctx, chkMsg.replace(/<[^>]+>/g, "").slice(0, 180), true);
+        return;
+      }
+      if (sub === "copy_invite") {
+        const tgId = Number(ctx.from?.id || 0);
+        const botUsername = await resolveBotUsernameForCtx(ctx);
+        const inviteTarget = buildInviteLink(tgId, botUsername);
+        await safeAnswerCallback(ctx, "已为你生成专属邀请链接");
+        if (/^https:\/\/t\.me\//i.test(inviteTarget)) {
+          await ctx.reply(
+            `🔗 <b>你的专属邀请链接</b>（点击下方代码块可一键复制）：\n<code>${escapeHtml(inviteTarget)}</code>\n\n转发给好友首次启动机器人即可生效！`,
+            { parse_mode: "HTML" }
+          );
+        } else {
+          await ctx.reply(
+            `🔗 <b>你的专属邀请码</b>：\n<code>${escapeHtml(inviteTarget)}</code>\n\n<i>提示：在 Vercel 环境变量配置 <code>BOT_USERNAME</code> 后可自动生成完整 https://t.me/... 邀请链接。</i>`,
+            { parse_mode: "HTML" }
+          );
+        }
         return;
       }
       if (sub === "redeem_prompt") {
