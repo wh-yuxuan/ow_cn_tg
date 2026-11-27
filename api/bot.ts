@@ -1993,6 +1993,39 @@ async function generateDeepSeekProfileRoast(
   return reviewHtml;
 }
 
+/**
+ * 为隐性段位预估补全职责前缀（如「坦克 钻石 3 - 钻石 1」），
+ * 若 AI 返回的区间里已经包含职责名称则避免重复拼接。
+ */
+function ensureEstimatedTierHasRole(
+  rawTier: string,
+  currentRankLabel: string
+): string {
+  const tier = sanitizeSafeText(rawTier || "当前段位附近", "m-tier").trim();
+  if (!tier) return "未知职责 当前段位附近";
+
+  const roleKeywords = ["坦克", "输出", "支援", "开放", "重装", "治疗", "自由"];
+  const hasRoleAlready = roleKeywords.some((kw) => tier.includes(kw));
+  if (hasRoleAlready) {
+    return tier;
+  }
+
+  const cur = sanitizeSafeText(currentRankLabel || "", "m-cur-rank").trim();
+  const roleMatches = Array.from(
+    new Set(
+      (cur.match(/(坦克|输出|支援|开放)/g) || []).filter(Boolean)
+    )
+  );
+
+  if (roleMatches.length === 1) {
+    return `${roleMatches[0]} ${tier}`;
+  }
+  if (roleMatches.length > 1) {
+    return `${roleMatches.join(" / ")} ${tier}`;
+  }
+  return `综合职责 ${tier}`;
+}
+
 async function generateDeepSeekMmrEvaluation(
   bnet: string,
   mode: CnGameMode,
@@ -2008,8 +2041,9 @@ async function generateDeepSeekMmrEvaluation(
   const systemPrompt = [
     "你是一位熟悉《守望先锋 2》隐藏分（MMR）与匹配机制的国服数据分析师。",
     "请根据玩家当前展示的段位、胜率、KDA 与场均输出/治疗/承伤表现，评估其隐性段位水平与上分阻力（24小时内复用）。",
+    "注意：estimated_tier 必须明确写明对应职责（如：单职责写“坦克 钻石 3 - 钻石 1”或“支援 大师 5 - 大师 3”；若多职责均有段位且表现差异明显，可写“坦克 钻石 2 / 输出 钻石 5 / 支援 钻石 4”）。",
     "请只输出纯 JSON，格式如下：",
-    '{ "estimated_tier": "预估隐性段位区间", "confidence": "评估置信度", "mmr_trend": "隐藏分走势判断", "key_factor": "决定隐性段位的关键指标", "summary": "综合评估小结（100字以内）" }',
+    '{ "estimated_tier": "带职责的预估隐性段位区间", "confidence": "评估置信度", "mmr_trend": "隐藏分走势判断", "key_factor": "决定隐性段位的关键指标", "summary": "综合评估小结（100字以内）" }',
   ].join("\n");
 
   const parsed = await callDeepSeekJson(systemPrompt, snapshotText);
@@ -2017,9 +2051,11 @@ async function generateDeepSeekMmrEvaluation(
     sanitizeSafeText(currentRankLabel || "未定级", "m-cur-rank").trim() ||
       "未定级"
   );
-  const estTier = escapeHtml(
-    sanitizeSafeText(parsed?.estimated_tier || "当前段位附近", "m-tier").trim()
+  const formattedEstTier = ensureEstimatedTierHasRole(
+    String(parsed?.estimated_tier || "当前段位附近"),
+    currentRankLabel
   );
+  const estTier = escapeHtml(formattedEstTier);
   const confidence = escapeHtml(
     sanitizeSafeText(parsed?.confidence || "中等", "m-conf").trim()
   );
