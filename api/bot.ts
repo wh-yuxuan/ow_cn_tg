@@ -1,8 +1,8 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-27 23:34:00 (Asia/Shanghai)
- * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
+ * 代码生成时间：2026-11-27 23:55:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
+ * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
  * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool)
  *         + 腾讯云/Docker 业务中转与异步队列 (/internal/*)
@@ -115,6 +115,7 @@ type PendingUserAction =
   | { type: "super_setting_inv_quota" }
   | { type: "super_setting_chk_quota" }
   | { type: "super_ai_provider_add" }
+  | { type: "super_ai_provider_key"; providerId: number }
   | { type: "super_dashen_account_add" }
   | { type: "super_dashen_account_edit"; accountId: number };
 
@@ -1173,22 +1174,6 @@ function buildAuthHeadersWithCredential(
   return headers;
 }
 
-function buildAuthHeaders(operatorId?: number): Record<string, string> {
-  return buildAuthHeadersWithCredential(
-    {
-      roleId: DASHEN_ROLE_ID,
-      authToken: DASHEN_TOKEN,
-      dts: DASHEN_DTS,
-      server: DASHEN_SERVER,
-      clientType: DASHEN_CLIENT_TYPE,
-      origin: DASHEN_ORIGIN,
-      referer: DASHEN_REFERER,
-      userAgent: DASHEN_USER_AGENT,
-    },
-    operatorId
-  );
-}
-
 async function dashenRequestWithCredential<T = any>(
   cred: DashenRequestCredential,
   method: "GET" | "POST",
@@ -1687,6 +1672,14 @@ function escapeHtml(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function formatNamedId(name: string | undefined | null, id: number | string): string {
+  const cleanName = String(name || "").trim();
+  const cleanId = String(id ?? "").trim();
+  if (cleanName && cleanId) return `${cleanName}（ID：${cleanId}）`;
+  if (cleanId) return `ID：${cleanId}`;
+  return cleanName || "未知用户";
 }
 
 function formatDuration(seconds: number): string {
@@ -2380,7 +2373,7 @@ function buildUserCenterView(
   const lines = [
     `👤 <b>个人中心</b>`,
     `━━━━━━━━━━━━━━━━━━`,
-    `• 昵称：<b>${escapeHtml(user.nickname || "未设置")}</b>（ID：<code>${user.tgId}</code>）`,
+    `• 用户：<b>${escapeHtml(formatNamedId(user.nickname || "未设置", user.tgId))}</b>`,
     `• 身份状态：<b>${statusBadge}</b>`,
     `• 剩余锐评次数：<b>${user.roastUnlimited ? "♾ 无限畅享" : `${user.quota} 次`}</b>`,
     `• 累计成功邀请：<b>${user.inviteCount}</b> 人`,
@@ -3306,7 +3299,7 @@ async function renderAdminHomePanel(
   const lines = [
     `🛠 <b>管理员控制台</b>`,
     `━━━━━━━━━━━━━━━━━━`,
-    `• 操作人：<b>${escapeHtml(admin.remark || "管理员")}</b>（<code>${admin.tgId}</code>）`,
+    `• 操作人：<b>${escapeHtml(formatNamedId(admin.remark || "管理员", admin.tgId))}</b>`,
     `• 角色身份：<b>${isSuper ? "👑 超级管理员" : "👮 普通管理员"}</b>`,
   ];
 
@@ -3422,6 +3415,7 @@ async function renderAiProvidersPanel(
           tgt === "docker" ? `⚡ 切Vercel #${p.id}` : `🐳 切Docker #${p.id}`,
           `ad:ai_tgt:${p.id}:${tgt === "docker" ? "vercel" : "docker"}`
         )
+        .text(`🔑 改Key #${p.id}`, `ad:ai_key:${p.id}`)
         .text(`🗑 删 #${p.id}`, `ad:ai_del:${p.id}`)
         .row();
     }
@@ -4185,6 +4179,23 @@ bot.on("callback_query:data", async (ctx) => {
       return;
     }
 
+    if (data.startsWith("ad:ai_key:")) {
+      await ctx.answerCallbackQuery();
+      const providerId = Number(data.split(":")[2] || 0);
+      if (tgId > 0 && providerId > 0) {
+        pendingUserInputs.set(tgId, {
+          action: { type: "super_ai_provider_key", providerId },
+          expiresAt: Date.now() + 3 * 60 * 1000,
+        });
+      }
+      await ctx.reply(
+        `🔑 <b>修改 AI 渠道 #${providerId} 的密钥</b>\n` +
+          `请直接发送新的 API Key（更新后将自动脱敏展示，建议更新完成后删除包含明文 Key 的聊天消息以防留痕）：`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
     if (data === "ad:ds_list") {
       await ctx.answerCallbackQuery();
       await renderDashenAccountsPanel(ctx, true);
@@ -4401,7 +4412,7 @@ bot.on("callback_query:data", async (ctx) => {
       const kb = new InlineKeyboard();
       for (const a of admins) {
         lines.push(
-          `• <b>${escapeHtml(a.remark || "管理员")}</b>（<code>${a.tgId}</code>）— ${a.role === "super_admin" ? "👑 超管" : a.isActive ? "✅ 启用" : "⏸ 停用"}`
+          `• <b>${escapeHtml(formatNamedId(a.remark || "管理员", a.tgId))}</b> — ${a.role === "super_admin" ? "👑 超管" : a.isActive ? "✅ 启用" : "⏸ 停用"}`
         );
         if (a.role !== "super_admin") {
           kb.text(`🔑 权限 #${a.tgId}`, `ad:adm_p:${a.tgId}`)
@@ -4459,7 +4470,7 @@ bot.on("callback_query:data", async (ctx) => {
       });
       kb.row().text("🔙 返回管理员列表", "ad:admins");
       await ctx.editMessageText(
-        `🔑 <b>编辑管理员权限 — ${escapeHtml(target.remark)}（<code>${targetId}</code>）</b>\n点击下方按钮可实时开关对应权限：`,
+        `🔑 <b>编辑管理员权限 — ${escapeHtml(formatNamedId(target.remark || "管理员", targetId))}</b>\n点击下方按钮可实时开关对应权限：`,
         { parse_mode: "HTML", reply_markup: kb }
       );
       return;
@@ -4513,6 +4524,7 @@ bot.on("callback_query:data", async (ctx) => {
           total: number;
           items: Array<{
             id: number;
+            operatorId?: number;
             operatorNickname: string;
             action: string;
             targetId: string;
@@ -4530,11 +4542,17 @@ bot.on("callback_query:data", async (ctx) => {
         `━━━━━━━━━━━━━━━━━━`,
       ];
       for (const item of d.items || []) {
+        const opLabel = item.operatorId
+          ? formatNamedId(
+              String(item.operatorNickname || "").replace(/（ID：\d+）$/, ""),
+              item.operatorId
+            )
+          : item.operatorNickname || "未知用户";
         lines.push(
-          `• <code>${escapeHtml(item.createdAt)}</code> | 操作人 <b>${escapeHtml(item.operatorNickname || "未知昵称")}</b>`
+          `• <code>${escapeHtml(item.createdAt)}</code> | 操作人 <b>${escapeHtml(opLabel)}</b>`
         );
         lines.push(
-          `   动作：<code>${escapeHtml(item.action)}</code>${item.targetId ? ` · 目标 <code>${escapeHtml(item.targetId)}</code>` : ""}`
+          `   动作：<b>${escapeHtml(item.action)}</b>${item.targetId ? ` · 目标：<b>${escapeHtml(item.targetId)}</b>` : ""}`
         );
         if (item.detail) {
           lines.push(`   说明：${escapeHtml(item.detail)}`);
@@ -4633,7 +4651,7 @@ bot.on("message:text", async (ctx, next) => {
         ];
         for (const u of d.users) {
           lines.push(
-            `• <b>${escapeHtml(u.nickname || "玩家")}</b>（<code>${u.tgId}</code>）| 余额 <b>${u.quota}</b> 次${u.vipActive ? " | 👑VIP" : ""}${u.isBanned ? " | 🚫封禁" : ""}`
+            `• <b>${escapeHtml(formatNamedId(u.nickname || "玩家", u.tgId))}</b> | 余额 <b>${u.quota}</b> 次${u.vipActive ? " | 👑VIP" : ""}${u.isBanned ? " | 🚫封禁" : ""}`
           );
         }
         await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
@@ -4641,7 +4659,7 @@ bot.on("message:text", async (ctx, next) => {
         const u = d.user;
         await ctx.reply(
           `👤 <b>用户详情</b>\n` +
-            `昵称：<b>${escapeHtml(u.nickname || "玩家")}</b>（<code>${u.tgId}</code>）\n` +
+            `用户：<b>${escapeHtml(formatNamedId(u.nickname || "玩家", u.tgId))}</b>\n` +
             `剩余次数：<b>${u.quota}</b> 次  |  VIP：${u.vipActive ? `有效至 ${escapeHtml(u.vipExpireAt || "")}` : "未开通"}\n` +
             `邀请人数：<b>${u.inviteCount}</b> 人  |  状态：${u.isBanned ? "🚫 已封禁" : "✅ 正常"}`,
           { parse_mode: "HTML" }
@@ -4849,7 +4867,7 @@ bot.on("message:text", async (ctx, next) => {
         }
       );
       await ctx.reply(
-        `✅ <b>已添加普通管理员：${escapeHtml(res.data.remark)}（<code>${res.data.tgId}</code>）</b>`,
+        `✅ <b>已添加普通管理员：${escapeHtml(formatNamedId(res.data.remark, res.data.tgId))}</b>`,
         { parse_mode: "HTML" }
       );
       return;
@@ -4911,6 +4929,32 @@ bot.on("message:text", async (ctx, next) => {
           `• 名称：<b>${escapeHtml(d.name)}</b>（ID #${d.id}）\n` +
           `• 模型：<code>${escapeHtml(d.model)}</code>\n` +
           `• 执行节点：<b>${d.executionTarget === "docker" ? "🐳 Docker 异步队列 (120s)" : "⚡ Vercel 节点"}</b>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    if (act.type === "super_ai_provider_key") {
+      const cleanKey = text.trim();
+      if (!cleanKey) {
+        await ctx.reply("⚠️ 新的 API Key 不能为空，请重新发送。", {
+          parse_mode: "HTML",
+        });
+        return;
+      }
+      const res = await relayInternalRequest<{
+        ok: boolean;
+        data: { id: number; name: string; maskedKey: string };
+      }>("POST", "/internal/admin/ai-providers/key", {
+        operatorId: tgId,
+        json: { providerId: act.providerId, apiKey: cleanKey },
+      });
+      const d = res.data;
+      await ctx.reply(
+        `✅ <b>已更新 AI 渠道密钥</b>\n` +
+          `• 渠道：<b>${escapeHtml(d.name)}</b>（#${d.id}）\n` +
+          `• 脱敏 Key：<code>${escapeHtml(d.maskedKey || "")}</code>\n` +
+          `<i>提示：为避免密钥明文留存在聊天记录中，建议顺手删除你刚才发送的那条密钥消息。</i>`,
         { parse_mode: "HTML" }
       );
       return;
@@ -5034,7 +5078,7 @@ export default async function handler(
       JSON.stringify({
         ok: true,
         service: "ow2-cn-tg-bot",
-        generatedAt: "2026-11-27 23:34:00",
+        generatedAt: "2026-11-27 23:55:00",
         dockerCallbackEnabled: true,
       })
     );
