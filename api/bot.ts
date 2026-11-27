@@ -1519,6 +1519,7 @@ const matchCache = new Map<
     customerToken: string;
     matchId: string;
     mode: CnGameMode;
+    page: number;
     expiresAt: number;
   }
 >();
@@ -1535,11 +1536,13 @@ const profileContextCache = new Map<
   }
 >();
 
+/** 缓存单局详情引用，记录来源页码以便返回战绩列表时精准回到原页 */
 function cacheMatchRef(
   bnet: string,
   customerToken: string,
   matchId: string,
-  mode: CnGameMode
+  mode: CnGameMode,
+  page = 1
 ): string {
   const shortId = `${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 6)}`;
   matchCache.set(shortId, {
@@ -1547,6 +1550,7 @@ function cacheMatchRef(
     customerToken,
     matchId,
     mode,
+    page: Math.max(1, Number(page) || 1),
     expiresAt: Date.now() + 15 * 60 * 1000,
   });
   if (matchCache.size > 200) {
@@ -2484,9 +2488,14 @@ async function buildCnMatchListView(
   gameMode: CnGameMode,
   page = 1
 ): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const currentPage = Math.max(1, Number(page) || 1);
   const searchRes = await searchBnetAccount(bnet);
   const player = extractPlayerFromSearch(bnet, searchRes);
-  const listRes = await queryMatchList(player.customerToken, gameMode, page);
+  const listRes = await queryMatchList(
+    player.customerToken,
+    gameMode,
+    currentPage
+  );
   const listBody = unwrapData(listRes);
 
   const matches: any[] = Array.isArray(listBody)
@@ -2497,7 +2506,7 @@ async function buildCnMatchListView(
 
   const modeLabel = gameMode === "sport" ? "⚔️ 竞技" : "⚡ 快速";
   const lines: string[] = [
-    `📋 <b>${escapeHtml(player.nickname)} — 近期战绩（第 ${page} 页）</b>`,
+    `📋 <b>${escapeHtml(player.nickname)} — 近期战绩（第 ${currentPage} 页）</b>`,
     `模式：${modeLabel}  |  国服`,
     `<i>说明：数字格式为 消灭/助攻/阵亡（含比分与时间戳）</i>`,
     `━━━━━━━━━━━━━━━━━━`,
@@ -2508,7 +2517,7 @@ async function buildCnMatchListView(
   const nextM = gameMode === "sport" ? "l" : "s";
 
   if (matches.length === 0) {
-    lines.push(`📭 当前模式下第 ${page} 页暂无对局记录。`);
+    lines.push(`📭 当前模式下第 ${currentPage} 页暂无对局记录。`);
   } else {
     let detailBtnCount = 0;
     for (let i = 0; i < Math.min(matches.length, 8); i++) {
@@ -2560,7 +2569,8 @@ async function buildCnMatchListView(
           player.bnet,
           player.customerToken,
           matchId,
-          gameMode
+          gameMode,
+          currentPage
         );
         keyboard.text(`详情 #${i + 1}`, `d:${ref}`);
         detailBtnCount++;
@@ -2570,18 +2580,18 @@ async function buildCnMatchListView(
     if (detailBtnCount % 4 !== 0) keyboard.row();
   }
 
-  const prevCb = `m:${mCode}:${Math.max(1, page - 1)}:${player.bnet}`;
-  const nextCb = `m:${mCode}:${page + 1}:${player.bnet}`;
+  const prevCb = `m:${mCode}:${Math.max(1, currentPage - 1)}:${player.bnet}`;
+  const nextCb = `m:${mCode}:${currentPage + 1}:${player.bnet}`;
   const switchCb = `m:${nextM}:1:${player.bnet}`;
   const backCb = `o:${mCode}:${player.bnet}`;
 
-  if (page > 1 && isSafeCallbackData(prevCb)) {
+  if (currentPage > 1 && isSafeCallbackData(prevCb)) {
     keyboard.text("⬅️ 上一页", prevCb);
   }
   if (matches.length >= 5 && isSafeCallbackData(nextCb)) {
     keyboard.text("下一页 ➡️", nextCb);
   }
-  if (page > 1 || matches.length >= 5) keyboard.row();
+  if (currentPage > 1 || matches.length >= 5) keyboard.row();
 
   if (isSafeCallbackData(switchCb)) {
     keyboard.text(
@@ -2755,7 +2765,8 @@ async function buildCnMatchDetailView(refId: string): Promise<{
 
   const keyboard = new InlineKeyboard();
   const mCode = entry.mode === "sport" ? "s" : "l";
-  const backListCb = `m:${mCode}:1:${entry.bnet}`;
+  const returnPage = Math.max(1, Number(entry.page) || 1);
+  const backListCb = `m:${mCode}:${returnPage}:${entry.bnet}`;
   const backHomeCb = `o:${mCode}:${entry.bnet}`;
   const aiCb = `a:${refId}`;
 
