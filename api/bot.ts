@@ -3099,6 +3099,26 @@ function buildSuperSettingsView(settings: SystemSettingsDto): {
   return { text: lines, keyboard: kb };
 }
 
+// 【新增】向目标用户私聊推送「权益已生效」通知（异常隔离，失败不影响已生效的权益）
+async function notifyUserBenefitActivated(
+  ctx: Context,
+  targetTgId: number,
+  messageHtml: string
+): Promise<{ delivered: boolean }> {
+  if (!Number.isSafeInteger(targetTgId) || targetTgId <= 0) {
+    return { delivered: false };
+  }
+  try {
+    await ctx.api.sendMessage(targetTgId, messageHtml, {
+      parse_mode: "HTML",
+    });
+    return { delivered: true };
+  } catch (err) {
+    console.warn("[Benefit Notification Failed]", { targetTgId, err });
+    return { delivered: false };
+  }
+}
+
 async function handlePendingAdminInput(
   ctx: Context,
   operatorId: number,
@@ -3201,12 +3221,34 @@ async function handlePendingAdminInput(
         }
       );
       const d = r.data;
-      await ctx.reply(
-        state.action === "admin_quota_add"
-          ? `✅ <b>添加次数成功</b>\n用户 <code>${d.tgId}</code> 增加 <b>+${d.added}</b> 次（${d.beforeQuota} → <b>${d.afterQuota}</b>）\n原因：${escapeHtml(d.reason)}`
-          : `✅ <b>减少次数成功</b>\n用户 <code>${d.tgId}</code> 扣除 <b>-${d.deducted}</b> 次（${d.beforeQuota} → <b>${d.afterQuota}</b>）\n原因：${escapeHtml(d.reason)}`,
-        { parse_mode: "HTML" }
-      );
+      // 【修改】替换原有的 admin_quota_add / admin_quota_deduct 回复逻辑：仅在添加次数成功时推送「权益已生效」通知
+      if (state.action === "admin_quota_add") {
+        const notifyRes = await notifyUserBenefitActivated(
+          ctx,
+          Number(d.tgId),
+          [
+            `🎉 <b>权益已生效</b>`,
+            `━━━━━━━━━━━━━━━━━━`,
+            `⚡ <b>到账权益：</b>AI 锐评次数 <b>+${d.added}</b> 次`,
+            `📊 <b>当前剩余：</b><b>${d.afterQuota}</b> 次`,
+            `📝 <b>发放说明：</b>${escapeHtml(d.reason)}`,
+            `━━━━━━━━━━━━━━━━━━`,
+            `<i>现在即可前往查询国服战绩并体验 AI 锐评功能！</i>`,
+          ].join("\n")
+        );
+        const notifyFooter = notifyRes.delivered
+          ? `\n📩 用户通知：已推送送达`
+          : `\n📩 用户通知：发送失败（对方可能未私聊启动或已屏蔽机器人，但权益已正常入库）`;
+        await ctx.reply(
+          `✅ <b>添加次数成功</b>\n用户 <code>${d.tgId}</code> 增加 <b>+${d.added}</b> 次（${d.beforeQuota} → <b>${d.afterQuota}</b>）\n原因：${escapeHtml(d.reason)}${notifyFooter}`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        await ctx.reply(
+          `✅ <b>减少次数成功</b>\n用户 <code>${d.tgId}</code> 扣除 <b>-${d.deducted}</b> 次（${d.beforeQuota} → <b>${d.afterQuota}</b>）\n原因：${escapeHtml(d.reason)}`,
+          { parse_mode: "HTML" }
+        );
+      }
       return;
     }
 
@@ -3237,12 +3279,34 @@ async function handlePendingAdminInput(
         }
       );
       const d = r.data;
-      await ctx.reply(
-        d.mode === "revoke"
-          ? `✅ 已取消用户 <code>${d.tgId}</code> 的 VIP 会员（原因：${escapeHtml(d.reason)}）`
-          : `✅ 已更新用户 <code>${d.tgId}</code> VIP 到期时间为：<b>${escapeHtml(d.afterVip || "")}</b>（原因：${escapeHtml(d.reason)}）`,
-        { parse_mode: "HTML" }
-      );
+      // 【修改】替换原有的 admin_vip_manage 回复逻辑：仅在开通/续期 VIP 成功时推送「权益已生效」通知
+      if (d.mode === "revoke") {
+        await ctx.reply(
+          `✅ 已取消用户 <code>${d.tgId}</code> 的 VIP 会员（原因：${escapeHtml(d.reason)}）`,
+          { parse_mode: "HTML" }
+        );
+      } else {
+        const notifyRes = await notifyUserBenefitActivated(
+          ctx,
+          Number(d.tgId),
+          [
+            `🎉 <b>权益已生效</b>`,
+            `━━━━━━━━━━━━━━━━━━`,
+            `👑 <b>到账权益：</b>VIP 会员（<b>+${days}</b> 天 · AI 锐评无限制）`,
+            `⏳ <b>到期时间：</b><b>${escapeHtml(d.afterVip || "")}</b>（北京时间）`,
+            `📝 <b>发放说明：</b>${escapeHtml(d.reason)}`,
+            `━━━━━━━━━━━━━━━━━━`,
+            `<i>VIP 有效期内使用所有 AI 锐评均免扣次数，祝你上分愉快！</i>`,
+          ].join("\n")
+        );
+        const notifyFooter = notifyRes.delivered
+          ? `\n📩 用户通知：已推送送达`
+          : `\n📩 用户通知：发送失败（对方可能未私聊启动或已屏蔽机器人，但权益已正常入库）`;
+        await ctx.reply(
+          `✅ 已更新用户 <code>${d.tgId}</code> VIP 到期时间为：<b>${escapeHtml(d.afterVip || "")}</b>（原因：${escapeHtml(d.reason)}）${notifyFooter}`,
+          { parse_mode: "HTML" }
+        );
+      }
       return;
     }
 
