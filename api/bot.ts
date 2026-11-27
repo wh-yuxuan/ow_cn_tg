@@ -50,18 +50,25 @@ const VERCEL_PUBLIC_ORIGIN = (
   (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "https://owcntg.vercel.app")
 ).replace(/\/+$/, "");
 
+const DASHEN_API_ROOT =
+  process.env.DASHEN_API_ROOT ||
+  `${DASHEN_RELAY_ORIGIN}/v1/a19ld5tool`;
+
 const DASHEN_CUSTOMER_API_BASE =
   process.env.DASHEN_CUSTOMER_API_BASE ||
-  `${DASHEN_RELAY_ORIGIN}/v1/a19ld5tool/customer`;
+  `${DASHEN_API_ROOT}/customer`;
 
 const SEARCH_BNET_ACCOUNT_URL =
   process.env.SEARCH_BNET_ACCOUNT_URL ||
-  `${DASHEN_CUSTOMER_API_BASE}/queryBnetAccount`;
+  `${DASHEN_API_ROOT}/searchBnetAccount`;
 
-const SEARCH_BNET_METHOD = (
-  process.env.SEARCH_BNET_METHOD || "GET"
-).toUpperCase();
-const SEARCH_BNET_PARAM_KEY = process.env.SEARCH_BNET_PARAM_KEY || "bnet";
+const SEARCH_BNET_METHOD =
+  (process.env.SEARCH_BNET_METHOD || "POST").trim().toUpperCase() === "GET"
+    ? "GET"
+    : "POST";
+const SEARCH_BNET_PARAM_KEY = (
+  process.env.SEARCH_BNET_PARAM_KEY || "name"
+).trim();
 
 // AI 锐评与隐性段位评估模型配置（支持 OpenAI 兼容格式，默认值作为 Vercel 兜底通道）
 const AI_BASE_URL = (
