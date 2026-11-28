@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 15:55:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 16:06:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -217,7 +217,7 @@ interface AiProviderDto {
 }
 
 // ============================================================================
-// 2. 英雄 / 地图 / 段位 映射表
+// 2. 英雄 / 地图 / 段位 / 权限名称映射表
 // ============================================================================
 
 const DASHEN_HERO_ALIASES: Record<string, string[]> = {
@@ -1620,7 +1620,7 @@ async function saveRoastCacheRecord(params: {
 }
 
 // ============================================================================
-// 6. 管理员与超级管理员接口封装（含候选用户列表、全量卡密查询、权限开关、AI 渠道、轮询账号）
+// 6. 管理员与超级管理员接口封装（两级权限编辑视图、每页 10 人用户分页、全量查卡密、AI 渠道、轮询账号）
 // ============================================================================
 
 async function fetchAdminMe(operatorId: number): Promise<AdminMeDto | null> {
@@ -1978,6 +1978,9 @@ async function superRemoveAdmin(operatorId: number, targetTgId: number) {
   return res.data;
 }
 
+/**
+ * 第一级：管理员与权限管理列表页（不再把所有人的权限开关混在同一页，改为点击对应管理员进入专属权限编辑页）
+ */
 async function showAdminsPermissionPanel(
   ctx: Context,
   operatorId: number,
@@ -1985,19 +1988,15 @@ async function showAdminsPermissionPanel(
 ): Promise<void> {
   const d = await superFetchAdminsList(operatorId);
   const list = Array.isArray(d?.admins) ? d.admins : [];
-  const allPerms =
-    Array.isArray(d?.allPermissions) && d.allPermissions.length > 0
-      ? d.allPermissions
-      : ALL_ADMIN_PERMISSIONS;
   const permLabelsMap: Record<string, string> =
     d?.permissionLabels && typeof d.permissionLabels === "object"
       ? d.permissionLabels
       : PERMISSION_LABELS;
 
   const lines: string[] = [
-    `🧩 <b>管理员与权限管理</b>`,
+    `🧩 <b>管理员与权限管理（列表页）</b>`,
     `━━━━━━━━━━━━━━━━━━`,
-    `点击下方普通管理员的权限开关按钮即可实时开启或关闭对应权限：`,
+    `请选择某位普通管理员进入<b>专属权限编辑页</b>，避免多管理员时误改权限：`,
   ];
 
   const kb = new InlineKeyboard();
@@ -2018,32 +2017,20 @@ async function showAdminsPermissionPanel(
 
     if (a.role !== "super_admin") {
       const uid = Number(a.tgId);
-      allPerms.forEach((permCode: string, idx: number) => {
-        const enabled = perms.includes(permCode);
-        const label = permLabelsMap[permCode] || permCode;
-        kb.text(
-          `${enabled ? "✅" : "⬜"} ${label}`,
-          `sup:adm:perm:${uid}:${permCode}`
-        );
-        if (idx % 2 === 1) {
-          kb.row();
-        }
-      });
-      if (allPerms.length % 2 === 1) {
-        kb.row();
-      }
-
-      kb.text(
-        a.isActive ? `⏸ 停用 ${uid}` : `▶️ 启用 ${uid}`,
-        `sup:adm:tgl:${uid}`
-      )
+      const adminLabel = String(a.remark || uid);
+      kb.text(`🔧 编辑权限 · ${adminLabel} (${uid})`, `sup:adm:edit:${uid}`)
+        .row()
+        .text(
+          a.isActive ? `⏸ 停用 ${uid}` : `▶️ 启用 ${uid}`,
+          `sup:adm:tgl:${uid}`
+        )
         .text(`🗑 移除 ${uid}`, `sup:adm:del:${uid}`)
         .row();
     }
   }
 
   kb.text("➕ 添加管理员", "sup:adm:add")
-    .text("🔄 刷新权限", "sup:admins")
+    .text("🔄 刷新列表", "sup:admins")
     .row()
     .text("🔙 返回控制台", "adm:home");
 
@@ -2053,7 +2040,88 @@ async function showAdminsPermissionPanel(
       ctx,
       text,
       { parse_mode: "HTML", reply_markup: kb },
-      "权限列表已是最新"
+      "列表已是最新"
+    );
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+}
+
+/**
+ * 第二级：单个管理员专属权限编辑子页面（顶部醒目标识当前正在编辑哪位管理员）
+ */
+async function showSingleAdminEditPanel(
+  ctx: Context,
+  operatorId: number,
+  targetTgId: number,
+  editMessage = true
+): Promise<void> {
+  const d = await superFetchAdminsList(operatorId);
+  const list = Array.isArray(d?.admins) ? d.admins : [];
+  const allPerms: string[] =
+    Array.isArray(d?.allPermissions) && d.allPermissions.length > 0
+      ? d.allPermissions
+      : ALL_ADMIN_PERMISSIONS;
+  const permLabelsMap: Record<string, string> =
+    d?.permissionLabels && typeof d.permissionLabels === "object"
+      ? d.permissionLabels
+      : PERMISSION_LABELS;
+
+  const targetAdmin = list.find(
+    (x: any) => Number(x.tgId) === Number(targetTgId)
+  );
+  if (!targetAdmin) {
+    throw new Error(`未找到 TG ID 为 ${targetTgId} 的管理员`);
+  }
+  if (targetAdmin.role === "super_admin") {
+    throw new Error("超级管理员默认拥有全部权限，无需单独编辑。");
+  }
+
+  const perms = Array.isArray(targetAdmin.permissions)
+    ? targetAdmin.permissions
+    : [];
+  const stTag = targetAdmin.isActive ? "✅ 启用中" : "⏸ 已停用";
+  const adminName = String(targetAdmin.remark || targetTgId);
+  const permSummary =
+    perms.map((p: string) => permLabelsMap[p] || p).join("、") || "暂无权限";
+
+  const lines: string[] = [
+    `🔧 <b>管理员权限专属编辑页</b>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `🎯 <b>当前正在编辑管理员：${escapeHtml(adminName)}</b>`,
+    `• 管理员 TG ID：<code>${Number(targetTgId)}</code>`,
+    `• 当前账号状态：<b>${stTag}</b>`,
+    `• 当前已开权限：<i>${escapeHtml(permSummary)}</i>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `点击下方按钮为 <b>${escapeHtml(adminName)}</b> 切换权限：`,
+  ];
+
+  const kb = new InlineKeyboard();
+  allPerms.forEach((permCode: string, idx: number) => {
+    const enabled = perms.includes(permCode);
+    const label = permLabelsMap[permCode] || permCode;
+    kb.text(
+      `${enabled ? "✅" : "⬜"} ${label}`,
+      `sup:adm:perm:${Number(targetTgId)}:${permCode}`
+    );
+    if (idx % 2 === 1) {
+      kb.row();
+    }
+  });
+  if (allPerms.length % 2 === 1) {
+    kb.row();
+  }
+
+  kb.text("🔙 返回管理员列表", "sup:admins")
+    .text("🛠 返回控制台", "adm:home");
+
+  const text = lines.join("\n");
+  if (editMessage && ctx.callbackQuery?.message) {
+    await safeEditTextMessage(
+      ctx,
+      text,
+      { parse_mode: "HTML", reply_markup: kb },
+      "权限状态已是最新"
     );
   } else {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
@@ -3936,7 +4004,7 @@ async function executeCnMatchListQuery(
 }
 
 // ============================================================================
-// 11. 管理员控制台与超级管理员面板（含权限逐项开关、每页 10 人用户分页、🔑 大神账号轮询）
+// 11. 管理员控制台与超级管理员面板（两级权限编辑视图、每页 10 人用户分页、🔑 大神账号轮询）
 // ============================================================================
 
 function buildAdminHomeKeyboard(adminMe: AdminMeDto): InlineKeyboard {
@@ -4725,6 +4793,13 @@ bot.on("callback_query", async (ctx) => {
       return;
     }
 
+    if (data.startsWith("sup:adm:edit:")) {
+      await ctx.answerCallbackQuery({ text: "进入专属权限编辑页..." });
+      const targetId = Number(data.slice("sup:adm:edit:".length));
+      await showSingleAdminEditPanel(ctx, tgId, targetId, true);
+      return;
+    }
+
     if (data.startsWith("sup:adm:perm:")) {
       await ctx.answerCallbackQuery({ text: "正在切换权限..." });
       const rest = data.slice("sup:adm:perm:".length);
@@ -4733,8 +4808,10 @@ bot.on("callback_query", async (ctx) => {
         const targetId = Number(rest.slice(0, colonIdx));
         const permCode = rest.slice(colonIdx + 1);
         await superToggleAdminPermItem(tgId, targetId, permCode);
+        await showSingleAdminEditPanel(ctx, tgId, targetId, true);
+      } else {
+        await showAdminsPermissionPanel(ctx, tgId, true);
       }
-      await showAdminsPermissionPanel(ctx, tgId, true);
       return;
     }
 
