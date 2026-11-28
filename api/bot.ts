@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 15:27:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 15:48:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -1275,6 +1275,19 @@ function formatRedeemStatusLabel(status: unknown): string {
   return "🟢 未使用";
 }
 
+async function replyQuoteUser(
+  ctx: Context,
+  htmlText: string,
+  extra: Record<string, any> = {}
+): Promise<void> {
+  const replyToId = ctx.message?.message_id;
+  await ctx.reply(htmlText, {
+    parse_mode: "HTML",
+    ...(replyToId ? { reply_to_message_id: replyToId } : {}),
+    ...extra,
+  });
+}
+
 // ============================================================================
 // 4. 敏感消息自动删除工具
 // ============================================================================
@@ -1627,60 +1640,145 @@ async function fetchAdminMe(operatorId: number): Promise<AdminMeDto | null> {
 
 async function adminQueryUserOrList(
   operatorId: number,
-  queryText: string
+  queryText: string,
+  page = 1,
+  pageSize = 10
 ): Promise<any> {
   const res = await relayInternalRequest<{ ok: boolean; data: any }>(
     "/internal/admin/user",
     {
       method: "GET",
       operatorId,
-      query: { query: queryText },
+      query: { query: queryText, page, pageSize },
     }
   );
   return res.data;
 }
 
-async function buildUserCandidateHints(
-  operatorId: number
-): Promise<{
-  bannedSectionLines: string[];
-  allUserLines: string[];
-}> {
-  try {
-    const data = await adminQueryUserOrList(operatorId, "all");
-    const list = Array.isArray(data?.users) ? data.users : [];
-    const bannedUsers = list.filter((u: any) => Boolean(u?.isBanned));
+type UserPickerScene =
+  | "query"
+  | "quota_add"
+  | "quota_deduct"
+  | "vip"
+  | "ban"
+  | "admin_add";
 
-    const bannedSectionLines: string[] = [];
-    if (bannedUsers.length > 0) {
-      bannedSectionLines.push(
-        `🔒 <b>当前已封禁用户（解封点击 ID 复制）</b>`
+function buildUserPageKeyboard(
+  scene: UserPickerScene,
+  page: number,
+  totalPages: number,
+  backCallback = "adm:home"
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (totalPages > 1) {
+    if (page > 1) {
+      kb.text("⬅️ 上一页", `adm:up:${scene}:${page - 1}`);
+    }
+    if (page < totalPages) {
+      kb.text("➡️ 下一页", `adm:up:${scene}:${page + 1}`);
+    }
+    kb.row();
+  }
+  kb.text("🔙 返回控制台", backCallback);
+  return kb;
+}
+
+async function renderUserPagePanel(
+  ctx: Context,
+  operatorId: number,
+  scene: UserPickerScene,
+  page = 1,
+  editMessage = false
+): Promise<void> {
+  const data = await adminQueryUserOrList(operatorId, "all", page, 10);
+  const currentPage = Number(data?.page || 1);
+  const totalPages = Math.max(1, Number(data?.totalPages || 1));
+  const totalUsers = Number(data?.totalUsers || 0);
+  const users = Array.isArray(data?.users) ? data.users : [];
+  const bannedUsers = Array.isArray(data?.bannedUsers) ? data.bannedUsers : [];
+
+  const sceneHeader: Record<UserPickerScene, string[]> = {
+    query: [
+      `👥 <b>用户列表（每页 10 人 · 第 ${currentPage}/${totalPages} 页 · 共 ${totalUsers} 人）</b>`,
+      `点击下方 <code>ID</code> 可复制，也可直接发送单个 TG ID 或 <code>@用户名</code> 精确查询：`,
+    ],
+    quota_add: [
+      `➕ <b>为用户增加锐评次数（每页 10 人 · 第 ${currentPage}/${totalPages} 页）</b>`,
+      `请按格式输入：<code>用户TG_ID 增加次数 原因</code>（如 <code>123456789 5 活动奖励</code>）`,
+      `点击下方用户 <code>ID</code> 即可自动复制：`,
+    ],
+    quota_deduct: [
+      `➖ <b>为用户扣减锐评次数（每页 10 人 · 第 ${currentPage}/${totalPages} 页）</b>`,
+      `请按格式输入：<code>用户TG_ID 扣减次数 原因</code>（如 <code>123456789 2 违规扣除</code>）`,
+      `点击下方用户 <code>ID</code> 即可自动复制：`,
+    ],
+    vip: [
+      `👑 <b>VIP 会员管理（每页 10 人 · 第 ${currentPage}/${totalPages} 页）</b>`,
+      `开通/续期：<code>用户TG_ID grant 天数 原因</code>`,
+      `取消 VIP：<code>用户TG_ID revoke 原因</code>`,
+      `点击下方用户 <code>ID</code> 即可自动复制：`,
+    ],
+    ban: [
+      `🔒 <b>封禁 / 解封用户（每页 10 人 · 第 ${currentPage}/${totalPages} 页）</b>`,
+      `格式：<code>用户TG_ID ban|unban 原因</code>（如 <code>123456789 ban 刷号</code> 或 <code>123456789 unban 申诉通过</code>）`,
+    ],
+    admin_add: [
+      `➕ <b>添加普通管理员（每页 10 人 · 第 ${currentPage}/${totalPages} 页）</b>`,
+      `格式：<code>目标用户TG_ID 备注名</code>（如 <code>123456789 运营小王</code>）`,
+      `点击下方用户 <code>ID</code> 即可自动复制：`,
+    ],
+  };
+
+  const lines: string[] = [
+    ...(sceneHeader[scene] || []),
+    `━━━━━━━━━━━━━━━━━━`,
+  ];
+
+  if (scene === "ban" && bannedUsers.length > 0) {
+    lines.push(`🚫 <b>当前已封禁用户（解封点击 ID 复制）</b>`);
+    for (const bu of bannedUsers.slice(0, 10)) {
+      const nameWithId = formatUserNameWithId(bu);
+      lines.push(
+        `• <b>${escapeHtml(nameWithId)}</b> — ID：<code>${Number(bu.tgId)}</code>`
       );
-      for (const bu of bannedUsers.slice(0, 15)) {
-        const nameWithId = formatUserNameWithId(bu);
-        bannedSectionLines.push(
-          `• <b>${escapeHtml(nameWithId)}</b> — ID：<code>${Number(bu.tgId)}</code>`
-        );
-      }
     }
+    lines.push(`━━━━━━━━━━━━━━━━━━`, `👥 <b>全部用户列表（本页 10 人）</b>`);
+  }
 
-    const allUserLines: string[] = [];
-    if (list.length > 0) {
-      allUserLines.push(`👥 <b>可选用户列表（点击 ID 自动复制）</b>`);
-      for (const u of list.slice(0, 15)) {
-        const nick = String(u.nickname || "无昵称");
-        const tags: string[] = [];
-        if (u.vipActive) tags.push("👑VIP");
-        if (u.isBanned) tags.push("🔒已封禁");
-        allUserLines.push(
-          `• <b>${escapeHtml(nick)}</b> — ID：<code>${Number(u.tgId)}</code>（剩余 ${Number(u.quota || 0)} 次${tags.length ? ` · ${tags.join(" ")}` : ""}）`
-        );
-      }
-    }
+  if (users.length === 0) {
+    lines.push(`📭 <i>暂无用户数据。</i>`);
+  } else {
+    const startIdx = (currentPage - 1) * 10;
+    users.forEach((u: any, idx: number) => {
+      const nick = String(u.nickname || "无昵称");
+      const tags: string[] = [];
+      if (u.vipActive) tags.push("👑VIP");
+      if (u.isBanned) tags.push("🔒已封禁");
+      lines.push(
+        `${startIdx + idx + 1}. <b>${escapeHtml(nick)}</b> — ID：<code>${Number(u.tgId)}</code>（剩余 <b>${Number(u.quota || 0)}</b> 次${tags.length ? ` · ${tags.join(" ")}` : ""}）`
+      );
+    });
+  }
 
-    return { bannedSectionLines, allUserLines };
-  } catch {
-    return { bannedSectionLines: [], allUserLines: [] };
+  const kb = buildUserPageKeyboard(
+    scene,
+    currentPage,
+    totalPages,
+    scene === "admin_add" ? "sup:admins" : "adm:home"
+  );
+
+  if (editMessage && ctx.callbackQuery?.message) {
+    await safeEditTextMessage(
+      ctx,
+      lines.join("\n"),
+      { parse_mode: "HTML", reply_markup: kb },
+      "已是当前页"
+    );
+  } else {
+    await ctx.reply(lines.join("\n"), {
+      parse_mode: "HTML",
+      reply_markup: kb,
+    });
   }
 }
 
@@ -4257,10 +4355,7 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "admin_user_query" },
         expiresAt: Date.now() + 180_000,
       });
-      await ctx.reply(
-        "👤 请输入要查询的用户 <b>TG ID</b> 或 <b>@用户名</b>（发送 <code>all</code> 可查看最近 20 位用户）：",
-        { parse_mode: "HTML" }
-      );
+      await renderUserPagePanel(ctx, tgId, "query", 1, false);
       return;
     }
 
@@ -4270,16 +4365,7 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "admin_quota_add" },
         expiresAt: Date.now() + 180_000,
       });
-      const { allUserLines } = await buildUserCandidateHints(tgId);
-      const lines = [
-        `➕ <b>为用户增加锐评次数</b>`,
-        `请按格式输入：<code>用户TG_ID 增加次数 原因</code>`,
-        `例如：<code>123456789 5 活动奖励</code>`,
-      ];
-      if (allUserLines.length > 0) {
-        lines.push(`━━━━━━━━━━━━━━━━━━`, ...allUserLines);
-      }
-      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      await renderUserPagePanel(ctx, tgId, "quota_add", 1, false);
       return;
     }
 
@@ -4289,10 +4375,7 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "admin_quota_deduct" },
         expiresAt: Date.now() + 180_000,
       });
-      await ctx.reply(
-        "➖ 请按格式输入：<code>用户TG_ID 扣减次数 原因</code>\n例如：<code>123456789 2 违规扣除</code>",
-        { parse_mode: "HTML" }
-      );
+      await renderUserPagePanel(ctx, tgId, "quota_deduct", 1, false);
       return;
     }
 
@@ -4302,10 +4385,7 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "admin_vip_manage" },
         expiresAt: Date.now() + 180_000,
       });
-      await ctx.reply(
-        "👑 请按格式输入 VIP 操作：\n• 开通/续期：<code>用户TG_ID grant 天数 原因</code>（如 <code>123456789 grant 30 活动VIP</code>）\n• 取消 VIP：<code>用户TG_ID revoke 原因</code>",
-        { parse_mode: "HTML" }
-      );
+      await renderUserPagePanel(ctx, tgId, "vip", 1, false);
       return;
     }
 
@@ -4315,20 +4395,16 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "admin_user_ban" },
         expiresAt: Date.now() + 180_000,
       });
-      const { bannedSectionLines, allUserLines } =
-        await buildUserCandidateHints(tgId);
-      const lines = [
-        `🔒 <b>封禁 / 解封用户</b>`,
-        `请按格式输入：<code>用户TG_ID ban|unban 原因</code>`,
-        `例如：<code>123456789 ban 刷号</code> 或 <code>123456789 unban 申诉通过</code>`,
-      ];
-      if (bannedSectionLines.length > 0) {
-        lines.push(`━━━━━━━━━━━━━━━━━━`, ...bannedSectionLines);
-      }
-      if (allUserLines.length > 0) {
-        lines.push(`━━━━━━━━━━━━━━━━━━`, ...allUserLines);
-      }
-      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      await renderUserPagePanel(ctx, tgId, "ban", 1, false);
+      return;
+    }
+
+    if (data.startsWith("adm:up:")) {
+      await ctx.answerCallbackQuery({ text: "正在翻页..." });
+      const parts = data.split(":");
+      const scene = (parts[2] || "query") as UserPickerScene;
+      const targetPage = Math.max(1, Number(parts[3] || 1));
+      await renderUserPagePanel(ctx, tgId, scene, targetPage, true);
       return;
     }
 
@@ -4588,10 +4664,7 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "super_admin_add" },
         expiresAt: Date.now() + 180_000,
       });
-      await ctx.reply(
-        "➕ 请输入：<code>目标用户TG_ID 备注名</code>\n例如：<code>123456789 运营小王</code>",
-        { parse_mode: "HTML" }
-      );
+      await renderUserPagePanel(ctx, tgId, "admin_add", 1, false);
       return;
     }
 
@@ -4897,10 +4970,10 @@ bot.on("message:text", async (ctx) => {
         }
 
         if (act.type === "admin_user_query") {
-          const d = await adminQueryUserOrList(tgId, text);
+          const d = await adminQueryUserOrList(tgId, text, 1, 10);
           if (d.isList) {
             const lines = [
-              `👥 <b>最近用户列表（总计 ${d.totalUsers} 人）</b>`,
+              `👥 <b>用户列表（每页 10 人 · 第 ${d.page || 1}/${d.totalPages || 1} 页 · 共 ${d.totalUsers} 人）</b>`,
               `━━━━━━━━━━━━━━━━━━`,
             ];
             for (const u of d.users || []) {
@@ -4908,7 +4981,7 @@ bot.on("message:text", async (ctx) => {
                 `• <b>${escapeHtml(u.nickname || "无昵称")}</b> (<code>${u.tgId}</code>) | 次数：<b>${u.quota}</b>${u.vipActive ? " | 👑VIP" : ""}${u.isBanned ? " | 🔒已封禁" : ""}`
               );
             }
-            await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+            await replyQuoteUser(ctx, lines.join("\n"));
           } else {
             const u = d.user;
             const lines = [
@@ -4919,32 +4992,40 @@ bot.on("message:text", async (ctx) => {
               `• 剩余次数：<b>${u.quota}</b> | VIP：${u.vipActive ? `✅ 至 ${escapeHtml(u.vipExpireAt || "")}` : "否"}`,
               `• 状态：${u.isBanned ? "🔒 已封禁" : "✅ 正常"} | 邀请数：<b>${u.inviteCount}</b>`,
             ];
-            await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+            await replyQuoteUser(ctx, lines.join("\n"));
           }
           return;
         }
 
         if (act.type === "admin_quota_add") {
           const [idStr, amtStr, ...rParts] = text.split(/\s+/);
-          await adminAddUserQuota(
+          const reasonText = rParts.join(" ");
+          const res = await adminAddUserQuota(
             tgId,
             Number(idStr),
             Number(amtStr),
-            rParts.join(" ")
+            reasonText
           );
-          await ctx.reply("✅ 已为用户添加锐评次数。");
+          await replyQuoteUser(
+            ctx,
+            `✅ <b>加次数操作成功</b>\n• 目标用户：<code>${res.tgId}</code>\n• 增加次数：<b>+${res.added}</b> 次\n• 最新余额：<b>${res.afterQuota}</b> 次\n• 原因：${escapeHtml(res.reason)}`
+          );
           return;
         }
 
         if (act.type === "admin_quota_deduct") {
           const [idStr, amtStr, ...rParts] = text.split(/\s+/);
-          await adminDeductUserQuota(
+          const reasonText = rParts.join(" ");
+          const res = await adminDeductUserQuota(
             tgId,
             Number(idStr),
             Number(amtStr),
-            rParts.join(" ")
+            reasonText
           );
-          await ctx.reply("✅ 已为用户扣减锐评次数。");
+          await replyQuoteUser(
+            ctx,
+            `✅ <b>减次数操作成功</b>\n• 目标用户：<code>${res.tgId}</code>\n• 扣减次数：<b>-${res.deducted}</b> 次\n• 最新余额：<b>${res.afterQuota}</b> 次\n• 原因：${escapeHtml(res.reason)}`
+          );
           return;
         }
 
@@ -4953,23 +5034,29 @@ bot.on("message:text", async (ctx) => {
           const uid = Number(parts[0]);
           const modeType = parts[1]?.toLowerCase();
           if (modeType === "revoke") {
-            await adminSetUserVip(
+            const res = await adminSetUserVip(
               tgId,
               uid,
               "revoke",
               0,
               parts.slice(2).join(" ")
             );
-            await ctx.reply("✅ 已取消该用户 VIP。");
+            await replyQuoteUser(
+              ctx,
+              `✅ <b>取消 VIP 操作成功</b>\n• 目标用户：<code>${res.tgId}</code>\n• 原因：${escapeHtml(res.reason)}`
+            );
           } else {
-            await adminSetUserVip(
+            const res = await adminSetUserVip(
               tgId,
               uid,
               "grant",
               Number(parts[2]),
               parts.slice(3).join(" ")
             );
-            await ctx.reply("✅ 已为用户开通/续期 VIP。");
+            await replyQuoteUser(
+              ctx,
+              `✅ <b>开通/续期 VIP 操作成功</b>\n• 目标用户：<code>${res.tgId}</code>\n• 到期时间：<b>${escapeHtml(res.afterVip || "")}</b>\n• 原因：${escapeHtml(res.reason)}`
+            );
           }
           return;
         }
@@ -4977,13 +5064,18 @@ bot.on("message:text", async (ctx) => {
         if (act.type === "admin_user_ban") {
           const [idStr, modeStr, ...rParts] = text.split(/\s+/);
           const banned = modeStr?.toLowerCase() !== "unban";
-          await adminSetUserBan(
+          const res = await adminSetUserBan(
             tgId,
             Number(idStr),
             banned,
             rParts.join(" ")
           );
-          await ctx.reply(banned ? "✅ 已封禁该用户。" : "✅ 已解除该用户封禁。");
+          await replyQuoteUser(
+            ctx,
+            banned
+              ? `✅ <b>封禁操作成功</b>\n• 目标用户：<code>${res.tgId}</code>\n• 原因：${escapeHtml(res.reason)}`
+              : `✅ <b>解封操作成功</b>\n• 目标用户：<code>${res.tgId}</code>\n• 原因：${escapeHtml(res.reason)}`
+          );
           return;
         }
 
@@ -4995,9 +5087,9 @@ bot.on("message:text", async (ctx) => {
             Number(valStr),
             Number(cntStr || 1)
           );
-          await ctx.reply(
-            `🎟 <b>已生成 ${created.count} 张卡密</b>\n\n<code>${escapeHtml((created.codes || []).join("\n"))}</code>`,
-            { parse_mode: "HTML" }
+          await replyQuoteUser(
+            ctx,
+            `✅ <b>造卡密成功（共 ${created.count} 张）</b>\n\n<code>${escapeHtml((created.codes || []).join("\n"))}</code>`
           );
           return;
         }
@@ -5015,11 +5107,11 @@ bot.on("message:text", async (ctx) => {
                 `• <code>${escapeHtml(c.code)}</code> | 类型：<b>${escapeHtml(formatRedeemTypeLabel(c.rewardType))}</b>（${escapeHtml(formatRedeemRewardText(c.rewardType, c.rewardValue))}） | 状态：<b>${escapeHtml(formatRedeemStatusLabel(c.status))}</b>`
               );
             }
-            await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+            await replyQuoteUser(ctx, lines.join("\n"));
           } else {
-            await ctx.reply(
-              `🔎 <b>卡密详情</b>\n• 编号：<code>${escapeHtml(info.code)}</code>\n• 类型：<b>${escapeHtml(formatRedeemTypeLabel(info.rewardType))}</b>（面额 <b>${escapeHtml(formatRedeemRewardText(info.rewardType, info.rewardValue))}</b>）\n• 状态：<b>${escapeHtml(formatRedeemStatusLabel(info.status))}</b>`,
-              { parse_mode: "HTML" }
+            await replyQuoteUser(
+              ctx,
+              `🔎 <b>卡密详情</b>\n• 编号：<code>${escapeHtml(info.code)}</code>\n• 类型：<b>${escapeHtml(formatRedeemTypeLabel(info.rewardType))}</b>（面额 <b>${escapeHtml(formatRedeemRewardText(info.rewardType, info.rewardValue))}</b>）\n• 状态：<b>${escapeHtml(formatRedeemStatusLabel(info.status))}</b>`
             );
           }
           return;
@@ -5027,15 +5119,29 @@ bot.on("message:text", async (ctx) => {
 
         if (act.type === "admin_redeem_void") {
           const [codeStr, ...rParts] = text.split(/\s+/);
-          await adminRevokeRedeemCode(tgId, codeStr, rParts.join(" "));
-          await ctx.reply("✅ 卡密已作废。");
+          const res = await adminRevokeRedeemCode(
+            tgId,
+            codeStr,
+            rParts.join(" ")
+          );
+          await replyQuoteUser(
+            ctx,
+            `✅ <b>作废卡密成功</b>\n• 卡密编号：<code>${escapeHtml(res.code)}</code>\n• 原因：${escapeHtml(res.voidReason)}`
+          );
           return;
         }
 
         if (act.type === "super_admin_add") {
           const [idStr, ...remParts] = text.split(/\s+/);
-          await superCreateAdmin(tgId, Number(idStr), remParts.join(" "));
-          await ctx.reply("✅ 已添加普通管理员。");
+          const res = await superCreateAdmin(
+            tgId,
+            Number(idStr),
+            remParts.join(" ")
+          );
+          await replyQuoteUser(
+            ctx,
+            `✅ <b>添加普通管理员成功</b>\n• 管理员 ID：<code>${res.tgId}</code>\n• 备注：<b>${escapeHtml(res.remark)}</b>`
+          );
           return;
         }
 
@@ -5052,7 +5158,7 @@ bot.on("message:text", async (ctx) => {
           } else {
             await superPatchSettings(tgId, { checkinRewardQuota: num });
           }
-          await ctx.reply("✅ 赠送次数已更新。");
+          await replyQuoteUser(ctx, "✅ <b>赠送次数更新成功</b>。");
           return;
         }
 
@@ -5060,14 +5166,17 @@ bot.on("message:text", async (ctx) => {
           const [name, baseUrl, apiKey, model, targetRaw] = text
             .split("|")
             .map((s) => s.trim());
-          await superAddAiProvider(tgId, {
+          const res = await superAddAiProvider(tgId, {
             name,
             baseUrl,
             apiKey,
             model,
             executionTarget: targetRaw === "docker" ? "docker" : "vercel",
           });
-          await ctx.reply("✅ 已添加 AI 渠道。");
+          await replyQuoteUser(
+            ctx,
+            `✅ <b>添加 AI 渠道成功</b>\n• 名称：<b>${escapeHtml(res.name)}</b>（#${res.id}）\n• 模型：<code>${escapeHtml(res.model)}</code>`
+          );
           return;
         }
 
@@ -5077,7 +5186,9 @@ bot.on("message:text", async (ctx) => {
             await tryDeleteMessage(ctx, ctx.chat?.id, act.promptMessageId);
           }
           await superUpdateAiProviderApiKey(tgId, act.providerId, text);
-          await ctx.reply("✅ AI 渠道密钥已更新。");
+          await ctx.reply("✅ <b>AI 渠道密钥更新成功</b>。", {
+            parse_mode: "HTML",
+          });
           return;
         }
 
@@ -5163,9 +5274,9 @@ bot.on("message:text", async (ctx) => {
       await executeCnOverviewQuery(ctx, normalized);
     }
   } catch (err: any) {
-    await ctx.reply(
-      `⚠️ ${escapeHtml(err?.message || "处理失败，请稍后重试")}`,
-      { parse_mode: "HTML" }
+    await replyQuoteUser(
+      ctx,
+      `❌ <b>操作失败</b>：${escapeHtml(err?.message || "处理失败，请稍后重试")}`
     );
   }
 });
