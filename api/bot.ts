@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 16:06:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 16:13:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -1288,6 +1288,23 @@ async function replyQuoteUser(
   });
 }
 
+function buildMainReplyKeyboard(isAdmin = false): Keyboard {
+  const kb = new Keyboard()
+    .text("🇨🇳 查国服战绩")
+    .text("📋 查战绩流水")
+    .row()
+    .text("👤 个人中心")
+    .text("📅 每日签到")
+    .row()
+    .text("🎁 兑换卡密")
+    .text("🔗 邀请好友");
+
+  if (isAdmin) {
+    kb.row().text("🛠 管理控制台");
+  }
+  return kb.resized();
+}
+
 // ============================================================================
 // 4. 敏感消息自动删除工具
 // ============================================================================
@@ -1979,7 +1996,7 @@ async function superRemoveAdmin(operatorId: number, targetTgId: number) {
 }
 
 /**
- * 第一级：管理员与权限管理列表页（不再把所有人的权限开关混在同一页，改为点击对应管理员进入专属权限编辑页）
+ * 第一级：管理员与权限管理列表页
  */
 async function showAdminsPermissionPanel(
   ctx: Context,
@@ -3811,58 +3828,72 @@ async function executeRoastFlow(
 }
 
 // ============================================================================
-// 10. 个人中心 / 签到 / 邀请 / 兑换 / 战绩查询指令处理
+// 10. 个人中心、签到、兑换、邀请与战绩查询处理
 // ============================================================================
 
-function buildMainReplyKeyboard(isAdmin = false): Keyboard {
-  const kb = new Keyboard()
-    .text("🇨🇳 查国服战绩")
-    .text("📋 查战绩流水")
-    .row()
-    .text("👤 个人中心")
-    .text("📅 每日签到")
-    .row()
-    .text("🎁 兑换卡密")
-    .text("🔗 邀请好友");
-  if (isAdmin) {
-    kb.row().text("🛠 管理控制台");
-  }
-  return kb.resized();
-}
-
-async function showUserProfileCard(ctx: Context): Promise<void> {
+async function showUserProfileCard(
+  ctx: Context,
+  editMessage = false
+): Promise<void> {
   const profile = await getUserProfile(ctx);
   const botUsername =
     runtimeBotUsername ||
     ENV_BOT_USERNAME ||
     ctx.me?.username ||
-    "your_bot";
+    "ow_cn_bot";
   const inviteLink = `https://t.me/${botUsername}?start=inv_${profile.tgId}`;
 
-  const vipStatusText = profile.vipActive
-    ? `✅ 已生效（到期：<b>${escapeHtml(profile.vipExpireAt || "")}</b> · 锐评不限量）`
-    : profile.vipExpireAt
-      ? `⌛ 已过期（曾于 ${escapeHtml(profile.vipExpireAt)} 到期）`
-      : "未开通";
+  const identityText =
+    profile.adminRole === "super_admin"
+      ? "👑 <b>超级管理员（锐评无限）</b>"
+      : profile.isAdmin
+        ? "🛡 <b>管理员（锐评无限）</b>"
+        : profile.vipActive
+          ? `👑 <b>VIP 会员（至 ${escapeHtml(profile.vipExpireAt || "")}）</b>`
+          : "👤 <b>普通用户</b>";
 
   const quotaText = profile.roastUnlimited
-    ? `♾ <b>不限量</b>（账户余额：${profile.quota} 次）`
+    ? `♾ <b>无限畅享</b>`
     : `<b>${profile.quota}</b> 次`;
 
   const lines = [
     `👤 <b>个人中心</b>`,
     `━━━━━━━━━━━━━━━━━━`,
-    `• 昵称：<b>${escapeHtml(profile.nickname || "未设置")}</b>`,
-    `• TG ID：<code>${profile.tgId}</code>`,
-    `• 锐评次数：${quotaText}`,
-    `• VIP 状态：${vipStatusText}`,
-    `• 累计邀请：<b>${profile.inviteCount}</b> 人`,
-    `• 今日签到：${profile.lastCheckinDate ? `✅ 已签到（${escapeHtml(profile.lastCheckinDate)}）` : "❌ 未签到"}`,
+    `• 用户：<b>${escapeHtml(profile.nickname || "未设置")}</b>（ID：<code>${profile.tgId}</code>）`,
+    `• 身份状态：${identityText}`,
+    `• 剩余锐评次数：${quotaText}`,
+    `• 累计成功邀请：<b>${profile.inviteCount}</b> 人`,
+    `• 今日签到状态：${profile.lastCheckinDate ? `✅ 今日已签到` : "❌ 今日未签到"}`,
     `━━━━━━━━━━━━━━━━━━`,
-    `🔗 专属邀请链接：\n<code>${escapeHtml(inviteLink)}</code>`,
+    `🎁 <b>福利与邀请</b>`,
+    `• 每日签到可领 +1 次锐评`,
+    `• 邀请好友首次注册可获 +1 次锐评`,
+    `• 专属邀请链接：`,
+    `<code>${escapeHtml(inviteLink)}</code>`,
   ];
 
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+  const kb = new InlineKeyboard()
+    .text("📅 立即签到", "uc:checkin")
+    .text("🎟 兑换卡密", "uc:redeem")
+    .row()
+    .text("🔗 复制邀请链接", "uc:invite")
+    .text("🔄 刷新状态", "uc:refresh");
+
+  if (profile.isAdmin) {
+    kb.row().text("🛠 打开管理控制台", "adm:home");
+  }
+
+  const text = lines.join("\n");
+  if (editMessage && ctx.callbackQuery?.message) {
+    await safeEditTextMessage(
+      ctx,
+      text,
+      { parse_mode: "HTML", reply_markup: kb },
+      "状态已是最新"
+    );
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
 }
 
 async function handleCheckinCommand(ctx: Context): Promise<void> {
@@ -4489,6 +4520,34 @@ bot.on("callback_query", async (ctx) => {
     if (data === "adm:home") {
       await ctx.answerCallbackQuery();
       await openAdminConsole(ctx, true);
+      return;
+    }
+
+    if (data === "uc:refresh") {
+      await ctx.answerCallbackQuery({ text: "正在刷新状态..." });
+      await showUserProfileCard(ctx, true);
+      return;
+    }
+
+    if (data === "uc:checkin") {
+      await ctx.answerCallbackQuery({ text: "正在签到..." });
+      await handleCheckinCommand(ctx);
+      return;
+    }
+
+    if (data === "uc:redeem") {
+      await ctx.answerCallbackQuery();
+      pendingUserInputs.set(tgId, {
+        action: { type: "redeem_input" },
+        expiresAt: Date.now() + 180_000,
+      });
+      await ctx.reply("🎟 请输入你的兑换卡密（输入后将自动删除消息）：");
+      return;
+    }
+
+    if (data === "uc:invite") {
+      await ctx.answerCallbackQuery({ text: "已生成专属邀请链接" });
+      await showUserProfileCard(ctx, false);
       return;
     }
 
