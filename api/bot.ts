@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 13:20:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 14:21:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -87,10 +87,6 @@ const DOCKER_AI_TIMEOUT_MS = 120_000;
 
 const API_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || "12000");
 const RELAY_TIMEOUT_MS = Number(process.env.RELAY_TIMEOUT_MS || "10000");
-
-const DEFAULT_REGISTER_QUOTA = 3;
-const CHECKIN_REWARD_QUOTA = 1;
-const INVITE_REWARD_QUOTA = 1;
 
 const userLastMode = new Map<number, CnGameMode>();
 const userLastBnet = new Map<number, string>();
@@ -827,25 +823,6 @@ const DASHEN_MAP_NAMES: Record<string, string> = {
   "576460752303428538": "国服新/未收录地图(576460752303428538)",
 };
 
-const DASHEN_STAT_GUID_NAMES: Record<string, string> = {
-  "603482350067646495": "消灭",
-  "603482350067646497": "累计游戏时间",
-  "603482350067646506": "阵亡",
-  "603482350067646507": "最后一击",
-  "603482350067646509": "单独消灭",
-  "603482350067646511": "武器命中率",
-  "603482350067646513": "射击命中",
-  "603482350067646913": "治疗量",
-  "603482350067647458": "暴击命中率",
-  "603482350067647462": "自我治疗量",
-  "603482350067647479": "治疗量",
-  "603482350067647492": "拯救玩家",
-  "603482350067647626": "强化伤害",
-  "603482350067647671": "对英雄伤害量",
-  "603482350067648392": "助攻",
-  "603482350067648623": "英雄获胜",
-};
-
 const DASHEN_RANK_NAME_CN: Record<string, string> = {
   bronze: "青铜",
   silver: "白银",
@@ -918,18 +895,8 @@ function resolveDashenMapGuid(rawGuid: unknown): string {
   return `地图#${str}`;
 }
 
-function resolveDashenHeroGuid(rawGuid: unknown): string {
-  if (rawGuid === undefined || rawGuid === null) return "";
-  const str = String(rawGuid).trim();
-  if (!str) return "";
-  const lower = str.toLowerCase();
-  if (HERO_ALIAS_TO_CN[lower]) return HERO_ALIAS_TO_CN[lower];
-  if (DASHEN_HERO_GUID_NAMES[lower]) return DASHEN_HERO_GUID_NAMES[lower];
-  return `英雄#${str}`;
-}
-
 // ============================================================================
-// 3. 网易大神与服务器内部业务 HTTP 客户端（含战网令牌缓存读写）
+// 3. 网易大神与服务器内部业务 HTTP 客户端（含战网令牌缓存读写与 GET 客户数据查询）
 // ============================================================================
 
 class DashenError extends Error {
@@ -1082,7 +1049,6 @@ function parseRawDashenHeadersInput(
       const key = line.slice(0, colonIdx).trim().toLowerCase();
       const val = line.slice(colonIdx + 1).trim();
       if (key === "cookie") {
-        // 明确不提取与存储 Cookie
         continue;
       }
       headerMap.set(key, val);
@@ -1250,7 +1216,11 @@ async function dashenRequestWithCredential<T = any>(
     payload.code !== 0 &&
     payload.code !== 200
   ) {
-    const reason = payload.msg || payload.message || `错误码 ${payload.code}`;
+    const reason =
+      payload.msg ||
+      payload.message ||
+      payload.errorMsg ||
+      `错误码 ${payload.code}`;
     throw new DashenError(
       400,
       `⚠️ 网易大神返回异常（code=${payload.code}）：${escapeHtml(String(reason))}`
@@ -1301,7 +1271,6 @@ async function resolvePlayerWithTokenCache(rawBnet: string): Promise<{
     throw new DashenError(400, "请输入有效的国服战网 ID。");
   }
 
-  // 1. 优先查 Redis 9 号库 / MySQL 精确缓存（严格区分大小写）
   try {
     const cacheRes = await relayInternalRequest<{
       ok: boolean;
@@ -1326,11 +1295,9 @@ async function resolvePlayerWithTokenCache(rawBnet: string): Promise<{
     console.warn("[Bnet Player Cache Lookup Fallback]", cacheErr);
   }
 
-  // 2. 缓存未命中：调用网易大神官方搜索接口
   const searchRes = await searchBnetAccount(exactBnet);
   const player = extractPlayerFromSearch(exactBnet, searchRes);
 
-  // 3. 将新查到的精确战网 ID 与 customerToken 存入 Redis 9 号库（满 100 或 30 分钟自动同步 MySQL）
   void relayInternalRequest("POST", "/internal/dashen/player-cache", {
     json: {
       bnetKey: exactBnet,
@@ -1398,7 +1365,11 @@ async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
         void reportDashenPoolAccount(cred.accountId, true);
         return res;
       }
-      void reportDashenPoolAccount(cred.accountId, false, "搜索返回无 customerToken");
+      void reportDashenPoolAccount(
+        cred.accountId,
+        false,
+        "搜索返回无 customerToken"
+      );
     } catch (err) {
       lastErr = err;
       void reportDashenPoolAccount(
@@ -1438,15 +1409,11 @@ async function queryCustomerCard(
     try {
       const res = await dashenRequestWithCredential(
         cred,
-        "POST",
+        "GET",
         `${DASHEN_CUSTOMER_API_BASE}/queryCard`,
         {
-          json: {
-            token: cred.authToken,
-            roleId: cred.roleId,
-            dts: cred.dts,
-            server: cred.server,
-            customerToken,
+          params: {
+            token: customerToken,
             gameMode,
           },
         }
@@ -1467,13 +1434,9 @@ async function queryCustomerCard(
     }
   }
   if (lastErr) throw lastErr;
-  return dashenRequest("POST", `${DASHEN_CUSTOMER_API_BASE}/queryCard`, {
-    json: {
-      token: DASHEN_TOKEN,
-      roleId: DASHEN_ROLE_ID,
-      dts: DASHEN_DTS,
-      server: DASHEN_SERVER,
-      customerToken,
+  return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryCard`, {
+    params: {
+      token: customerToken,
       gameMode,
     },
   });
@@ -1491,15 +1454,11 @@ async function queryCustomerCountInfo(
     try {
       const res = await dashenRequestWithCredential(
         cred,
-        "POST",
+        "GET",
         `${DASHEN_CUSTOMER_API_BASE}/queryCountInfo`,
         {
-          json: {
-            token: cred.authToken,
-            roleId: cred.roleId,
-            dts: cred.dts,
-            server: cred.server,
-            customerToken,
+          params: {
+            token: customerToken,
             gameMode,
           },
         }
@@ -1520,13 +1479,9 @@ async function queryCustomerCountInfo(
     }
   }
   if (lastErr) throw lastErr;
-  return dashenRequest("POST", `${DASHEN_CUSTOMER_API_BASE}/queryCountInfo`, {
-    json: {
-      token: DASHEN_TOKEN,
-      roleId: DASHEN_ROLE_ID,
-      dts: DASHEN_DTS,
-      server: DASHEN_SERVER,
-      customerToken,
+  return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryCountInfo`, {
+    params: {
+      token: customerToken,
       gameMode,
     },
   });
@@ -1536,7 +1491,7 @@ async function queryCustomerMatchList(
   customerToken: string,
   gameMode: CnGameMode,
   page = 1,
-  pageSize = 8
+  pageSize = 6
 ): Promise<DashenResponse> {
   const candidates = await fetchRotatedDashenCandidates();
   let lastErr: unknown = null;
@@ -1546,15 +1501,11 @@ async function queryCustomerMatchList(
     try {
       const res = await dashenRequestWithCredential(
         cred,
-        "POST",
+        "GET",
         `${DASHEN_CUSTOMER_API_BASE}/queryMatchList`,
         {
-          json: {
-            token: cred.authToken,
-            roleId: cred.roleId,
-            dts: cred.dts,
-            server: cred.server,
-            customerToken,
+          params: {
+            token: customerToken,
             gameMode,
             page,
             pageSize,
@@ -1577,13 +1528,9 @@ async function queryCustomerMatchList(
     }
   }
   if (lastErr) throw lastErr;
-  return dashenRequest("POST", `${DASHEN_CUSTOMER_API_BASE}/queryMatchList`, {
-    json: {
-      token: DASHEN_TOKEN,
-      roleId: DASHEN_ROLE_ID,
-      dts: DASHEN_DTS,
-      server: DASHEN_SERVER,
-      customerToken,
+  return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryMatchList`, {
+    params: {
+      token: customerToken,
       gameMode,
       page,
       pageSize,
@@ -1603,15 +1550,11 @@ async function queryCustomerMatchInfo(
     try {
       const res = await dashenRequestWithCredential(
         cred,
-        "POST",
+        "GET",
         `${DASHEN_CUSTOMER_API_BASE}/queryMatchInfo`,
         {
-          json: {
-            token: cred.authToken,
-            roleId: cred.roleId,
-            dts: cred.dts,
-            server: cred.server,
-            customerToken,
+          params: {
+            token: customerToken,
             matchId,
           },
         }
@@ -1632,13 +1575,9 @@ async function queryCustomerMatchInfo(
     }
   }
   if (lastErr) throw lastErr;
-  return dashenRequest("POST", `${DASHEN_CUSTOMER_API_BASE}/queryMatchInfo`, {
-    json: {
-      token: DASHEN_TOKEN,
-      roleId: DASHEN_ROLE_ID,
-      dts: DASHEN_DTS,
-      server: DASHEN_SERVER,
-      customerToken,
+  return dashenRequest("GET", `${DASHEN_CUSTOMER_API_BASE}/queryMatchInfo`, {
+    params: {
+      token: customerToken,
       matchId,
     },
   });
@@ -1736,7 +1675,10 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
-function formatNamedId(name: string | undefined | null, id: number | string): string {
+function formatNamedId(
+  name: string | undefined | null,
+  id: number | string
+): string {
   const cleanName = String(name || "").trim();
   const cleanId = String(id ?? "").trim();
   if (cleanName && cleanId) return `${cleanName}（ID：${cleanId}）`;
@@ -1838,7 +1780,7 @@ function extractPlayerFromSearch(
   if (!matchedToken) {
     throw new DashenError(
       404,
-      `未找到国服战网账号 <code>${escapeHtml(queryBnet)}</code>（注意区分大小写；若未绑定网易大神或搜索接口维护中请稍后再试）。`
+      `未找到国服战网账号 <code>${escapeHtml(queryBnet)}</code>（可能未绑定网易大神、战网大小写不匹配，或搜索接口正在官方维护中）。`
     );
   }
 
@@ -1850,14 +1792,14 @@ function extractPlayerFromSearch(
 }
 
 // ============================================================================
-// 5. 战绩总览 / 战绩流水 / 对局详情 构建器
+// 5. 战绩总览 / 战绩流水 / 对局详情 构建器（兼容 queryCountInfo 与 queryMatchList 实测结构）
 // ============================================================================
 
 function formatRankSegment(entry: any): string {
   if (!entry || typeof entry !== "object") return "";
   const tierRaw =
-    entry.rankName ||
     entry.rank_name ||
+    entry.rankName ||
     entry.tierName ||
     entry.tier_name ||
     entry.rank ||
@@ -1867,15 +1809,23 @@ function formatRankSegment(entry: any): string {
     "";
   const tier = translateRankName(tierRaw);
   const subTier =
-    entry.subRank ||
-    entry.sub_rank ||
-    entry.rankLevel ||
-    entry.rank_level ||
-    entry.star ||
-    entry.division ||
+    entry.rank_sub_tier ??
+    entry.rankSubTier ??
+    entry.subRank ??
+    entry.sub_rank ??
+    entry.rankLevel ??
+    entry.rank_level ??
+    entry.star ??
+    entry.division ??
     "";
   const score =
-    entry.score ?? entry.point ?? entry.points ?? entry.mmr ?? entry.rating;
+    entry.rankScore ??
+    entry.rank_score ??
+    entry.score ??
+    entry.point ??
+    entry.points ??
+    entry.mmr ??
+    entry.rating;
 
   const parts: string[] = [];
   if (tier) {
@@ -1885,6 +1835,28 @@ function formatRankSegment(entry: any): string {
     parts.push(`${score}分`);
   }
   return parts.join(" ");
+}
+
+function translateRoleType(roleVal: unknown): string {
+  const s = String(roleVal || "").trim().toLowerCase();
+  if (!s) return "";
+  if (s.includes("tank") || s.includes("重装") || s.includes("坦克"))
+    return "重装";
+  if (
+    s.includes("dps") ||
+    s.includes("damage") ||
+    s.includes("输出") ||
+    s.includes("伤害")
+  )
+    return "输出";
+  if (
+    s.includes("support") ||
+    s.includes("healer") ||
+    s.includes("支援") ||
+    s.includes("治疗")
+  )
+    return "支援";
+  return String(roleVal);
 }
 
 function buildCnOverviewKeyboard(
@@ -1927,6 +1899,7 @@ async function buildCnOverviewView(
   keyboard: InlineKeyboard;
   snapshotText: string;
   currentRankLabel: string;
+  customerToken: string;
 }> {
   const player = await resolvePlayerWithTokenCache(bnet);
 
@@ -1937,45 +1910,39 @@ async function buildCnOverviewView(
 
   const cardData = cardRes?.data ?? cardRes?.result ?? {};
   const countData = countRes?.data ?? countRes?.result ?? {};
+  const guide =
+    countData.guideCountData && typeof countData.guideCountData === "object"
+      ? countData.guideCountData
+      : countData;
 
+  const displayBnet = String(
+    cardData.name || countData.name || player.bnet || bnet
+  ).trim();
   const modeLabel = mode === "sport" ? "竞技比赛" : "快速/休闲";
-  const seasonText =
-    cardData.seasonName ||
-    cardData.season_name ||
-    cardData.season ||
-    countData.seasonName ||
-    "当前赛季";
 
   const rankLines: string[] = [];
+  const lastRankSeg = formatRankSegment(guide.lastRankInfo);
+  const maxRankSeg = formatRankSegment(guide.maxRankInfo);
+  if (lastRankSeg) {
+    rankLines.push(`• 当前/近期段位：<b>${escapeHtml(lastRankSeg)}</b>`);
+  }
+  if (maxRankSeg) {
+    rankLines.push(`• 历史最高段位：<b>${escapeHtml(maxRankSeg)}</b>`);
+  }
+
   const roleRankList =
     cardData.roleRankList ||
     cardData.role_rank_list ||
     cardData.ranks ||
     cardData.rankList ||
+    guide.roleRankList ||
     [];
   if (Array.isArray(roleRankList) && roleRankList.length > 0) {
     for (const item of roleRankList) {
-      const roleRaw = String(
-        item.role || item.roleName || item.role_name || item.duty || ""
-      ).toLowerCase();
-      let roleCn = "综合";
-      if (roleRaw.includes("tank") || roleRaw.includes("重装") || roleRaw.includes("坦克")) {
-        roleCn = "重装";
-      } else if (
-        roleRaw.includes("dps") ||
-        roleRaw.includes("damage") ||
-        roleRaw.includes("输出") ||
-        roleRaw.includes("伤害")
-      ) {
-        roleCn = "输出";
-      } else if (
-        roleRaw.includes("support") ||
-        roleRaw.includes("healer") ||
-        roleRaw.includes("支援") ||
-        roleRaw.includes("治疗")
-      ) {
-        roleCn = "支援";
-      }
+      const roleCn =
+        translateRoleType(
+          item.role || item.roleName || item.role_name || item.duty
+        ) || "综合";
       const seg = formatRankSegment(item);
       if (seg) {
         rankLines.push(`• ${roleCn}：<b>${escapeHtml(seg)}</b>`);
@@ -1988,47 +1955,34 @@ async function buildCnOverviewView(
       ? rankLines.map((l) => l.replace(/<[^>]+>/g, "")).join(" | ")
       : "暂无公开段位";
 
-  const summaryObj =
-    countData.summary ||
-    countData.careerSummary ||
-    countData.statSummary ||
-    cardData.summary ||
-    countData ||
-    {};
-
-  const wins = Number(
-    summaryObj.winCount ??
-      summaryObj.wins ??
-      summaryObj.win ??
-      cardData.winCount ??
-      cardData.wins ??
-      0
-  );
-  const losses = Number(
-    summaryObj.loseCount ??
-      summaryObj.losses ??
-      summaryObj.loss ??
-      cardData.loseCount ??
-      cardData.losses ??
-      0
-  );
-  const draws = Number(
-    summaryObj.drawCount ?? summaryObj.draws ?? summaryObj.draw ?? 0
-  );
   const totalGames = Number(
-    summaryObj.matchCount ??
-      summaryObj.games ??
-      summaryObj.totalGames ??
-      wins + losses + draws
+    guide.matchSum ??
+      guide.matchCount ??
+      guide.games ??
+      guide.totalGames ??
+      cardData.matchSum ??
+      0
   );
   const winRateRaw =
-    summaryObj.winRate ??
-    summaryObj.win_rate ??
+    guide.winRate ??
+    guide.win_rate ??
     cardData.winRate ??
     cardData.win_rate ??
-    (totalGames > 0 ? (wins / totalGames) * 100 : 0);
+    0;
+  const kdaVal = guide.kda ?? "";
+  const aveKill = guide.aveKill ?? guide.ave_kill ?? "";
+  const aveAssist = guide.aveAssist ?? guide.ave_assist ?? "";
+  const aveDeath = guide.aveDeath ?? guide.ave_death ?? "";
+  const aveHeroDamage = guide.aveHeroDamage ?? guide.ave_hero_damage ?? "";
+  const gameTimeRaw = guide.gameTime ?? cardData.gameTime ?? "";
 
   const heroListRaw =
+    (Array.isArray(guide.presetsSummaryList) && guide.presetsSummaryList.length > 0
+      ? guide.presetsSummaryList
+      : null) ||
+    (Array.isArray(guide.openQueueSummaryList) && guide.openQueueSummaryList.length > 0
+      ? guide.openQueueSummaryList
+      : null) ||
     countData.heroList ||
     countData.hero_list ||
     countData.heroes ||
@@ -2040,58 +1994,85 @@ async function buildCnOverviewView(
   if (Array.isArray(heroListRaw) && heroListRaw.length > 0) {
     const sortedHeroes = [...heroListRaw]
       .sort((a, b) => {
-        const ta = Number(a.playTime ?? a.timePlayed ?? a.gameTime ?? a.duration ?? a.matchCount ?? 0);
-        const tb = Number(b.playTime ?? b.timePlayed ?? b.gameTime ?? b.duration ?? b.matchCount ?? 0);
+        const ta = Number(
+          a.matchSum ?? a.playTime ?? a.timePlayed ?? a.gameTime ?? a.duration ?? 0
+        );
+        const tb = Number(
+          b.matchSum ?? b.playTime ?? b.timePlayed ?? b.gameTime ?? b.duration ?? 0
+        );
         return tb - ta;
       })
       .slice(0, 5);
 
     for (const h of sortedHeroes) {
       const hName = resolveDashenHeroName(
-        h.heroName || h.hero_name || h.name || h.heroGuid || h.hero_guid || h.heroId
+        h.heroName ||
+          h.hero_name ||
+          h.name ||
+          h.heroGuid ||
+          h.hero_guid ||
+          h.heroId
       );
       if (!hName) continue;
-      const secs = Number(
-        h.playTime ?? h.timePlayed ?? h.gameTime ?? h.duration ?? 0
-      );
+      const hMatches = Number(h.matchSum ?? h.matchCount ?? h.games ?? 0);
+      const hWins = Number(h.winSum ?? h.winCount ?? 0);
       const hWinRate = formatWinRate(
-        h.winRate ?? h.win_rate ?? (h.winCount && h.matchCount ? (Number(h.winCount) / Number(h.matchCount)) * 100 : 0)
+        h.winRate ??
+          h.win_rate ??
+          (hMatches > 0 ? (hWins / hMatches) * 100 : 0)
       );
+      const hLevel = Number(h.heroLevel ?? 0);
       heroLines.push(
-        `• <b>${escapeHtml(hName)}</b>：${secs > 0 ? `${formatDuration(secs)} · ` : ""}胜率 <b>${escapeHtml(hWinRate)}</b>`
+        `• <b>${escapeHtml(hName)}</b>` +
+          `${hLevel > 0 ? ` (Lv.${hLevel})` : ""}` +
+          `${hMatches > 0 ? ` · ${hMatches}场` : ""}` +
+          ` · 胜率 <b>${escapeHtml(hWinRate)}</b>`
       );
     }
   }
 
   const lines: string[] = [
-    `🇨🇳 <b>国服战绩总览 — ${escapeHtml(player.bnet)}</b>`,
-    `🎮 模式：<b>${escapeHtml(modeLabel)}</b>  |  🗓 ${escapeHtml(String(seasonText))}`,
+    `🇨🇳 <b>国服战绩总览 — ${escapeHtml(displayBnet)}</b>`,
+    `🎮 模式：<b>${escapeHtml(modeLabel)}</b>` +
+      `${gameTimeRaw !== "" && gameTimeRaw !== null ? `  |  ⏱ 时长：<b>${escapeHtml(String(gameTimeRaw))}</b>` : ""}`,
     `━━━━━━━━━━━━━━━━━━`,
   ];
 
   if (rankLines.length > 0) {
-    lines.push(`🏅 <b>当前职责段位</b>`);
-    lines.push(...rankLines);
-    lines.push(`━━━━━━━━━━━━━━━━━━`);
+    lines.push(`🏅 <b>段位信息</b>`, ...rankLines, `━━━━━━━━━━━━━━━━━━`);
   }
 
   lines.push(
     `📊 <b>对局统计</b>`,
-    `• 总场次：<b>${totalGames}</b> 场（胜 <b>${wins}</b> / 负 <b>${losses}</b>${draws > 0 ? ` / 平 <b>${draws}</b>` : ""}）`,
-    `• 胜率：<b>${escapeHtml(formatWinRate(winRateRaw))}</b>`
+    `• 累计场次：<b>${totalGames}</b> 场  |  胜率：<b>${escapeHtml(formatWinRate(winRateRaw))}</b>`
   );
+
+  if (kdaVal !== "" || aveKill !== "" || aveDeath !== "") {
+    lines.push(
+      `• KDA：<b>${escapeHtml(String(kdaVal || "-"))}</b>` +
+        `  |  场均 K/A/D：<b>${escapeHtml(String(aveKill || 0))}/${escapeHtml(String(aveAssist || 0))}/${escapeHtml(String(aveDeath || 0))}</b>`
+    );
+  }
+
+  if (aveHeroDamage !== "") {
+    lines.push(`• 场均英雄伤害：<b>${escapeHtml(formatNumber(aveHeroDamage))}</b>`);
+  }
 
   if (heroLines.length > 0) {
     lines.push(`━━━━━━━━━━━━━━━━━━`, `🦸 <b>常用英雄 TOP5</b>`, ...heroLines);
+  } else if (totalGames === 0 && rankLines.length === 0) {
+    lines.push(`<i>当前模式暂无更多赛季/英雄统计明细。</i>`);
   }
 
   const text = lines.join("\n");
   const snapshotText = [
-    `战网ID: ${player.bnet}`,
+    `战网ID: ${displayBnet}`,
     `模式: ${modeLabel}`,
-    `赛季: ${seasonText}`,
     `段位: ${currentRankLabel}`,
-    `胜负: ${wins}胜 ${losses}负 ${draws}平 (总${totalGames}场, 胜率${formatWinRate(winRateRaw)})`,
+    `总场次: ${totalGames}场, 胜率: ${formatWinRate(winRateRaw)}, KDA: ${kdaVal || "-"}`,
+    aveKill !== "" || aveDeath !== ""
+      ? `场均K/A/D: ${aveKill || 0}/${aveAssist || 0}/${aveDeath || 0}, 场均伤害: ${aveHeroDamage || 0}`
+      : "",
     heroLines.length > 0
       ? `常用英雄:\n${heroLines.map((l) => l.replace(/<[^>]+>/g, "")).join("\n")}`
       : "",
@@ -2101,9 +2082,10 @@ async function buildCnOverviewView(
 
   return {
     text,
-    keyboard: buildCnOverviewKeyboard(player.bnet, mode, isAdmin),
+    keyboard: buildCnOverviewKeyboard(displayBnet, mode, isAdmin),
     snapshotText,
     currentRankLabel,
+    customerToken: player.customerToken,
   };
 }
 
@@ -2115,6 +2097,7 @@ async function buildCnMatchListView(
   text: string;
   keyboard: InlineKeyboard;
   matchIds: string[];
+  customerToken: string;
 }> {
   const player = await resolvePlayerWithTokenCache(bnet);
 
@@ -2128,7 +2111,12 @@ async function buildCnMatchListView(
   const body = listRes?.data ?? listRes?.result ?? {};
   const rawList = Array.isArray(body)
     ? body
-    : body.list || body.records || body.matches || body.matchList || body.items || [];
+    : body.list ||
+      body.records ||
+      body.matches ||
+      body.matchList ||
+      body.items ||
+      [];
 
   const modeLabel = mode === "sport" ? "竞技比赛" : "快速/休闲";
   const lines: string[] = [
@@ -2151,7 +2139,13 @@ async function buildCnMatchListView(
 
       const retVal = Number(m.matchRet ?? m.result ?? m.win ?? -1);
       const retIcon =
-        retVal === 1 ? "🟢胜" : retVal === 0 ? "🔴负" : retVal === 2 ? "⚪平" : "⚪完";
+        retVal === 1
+          ? "🟢胜"
+          : retVal === 0
+            ? "🔴负"
+            : retVal === 2
+              ? "⚪平"
+              : "🎮局";
       const mapName =
         m.mapName ||
         m.map_name ||
@@ -2159,19 +2153,25 @@ async function buildCnMatchListView(
       const heroName = resolveDashenHeroName(
         m.heroName || m.hero_name || m.heroGuid || m.hero_guid || m.heroId
       );
+      const roleCn = translateRoleType(m.roleType || m.role_type);
       const k = Number(m.kill ?? m.kills ?? m.eliminations ?? 0);
       const a = Number(m.assist ?? m.assists ?? 0);
       const d = Number(m.death ?? m.deaths ?? 0);
+      const scoreText =
+        m.teamScore !== undefined && m.opponentScore !== undefined
+          ? `比分 <b>${m.teamScore}:${m.opponentScore}</b> · `
+          : "";
       const timeStr = formatMatchTimestamp(
-        m.beginTs || m.begin_ts || m.startTime || m.timestamp || m.time
+        m.beginTs || m.begin_ts || m.ts || m.startTime || m.timestamp || m.time
       );
 
       lines.push(
         `${idx + 1}. ${retIcon} <b>${escapeHtml(mapName || "未知地图")}</b>` +
-          `${heroName ? ` · <i>${escapeHtml(heroName)}</i>` : ""}`
+          `${heroName ? ` · <i>${escapeHtml(heroName)}</i>` : ""}` +
+          `${roleCn ? ` [${escapeHtml(roleCn)}]` : ""}`
       );
       lines.push(
-        `   K/A/D：<b>${k}/${a}/${d}</b>  |  🕒 ${escapeHtml(timeStr)}`
+        `   ${scoreText}K/A/D：<b>${k}/${a}/${d}</b>  |  🕒 ${escapeHtml(timeStr)}`
       );
 
       if (mId) {
@@ -2201,6 +2201,7 @@ async function buildCnMatchListView(
     text: lines.join("\n"),
     keyboard: kb,
     matchIds,
+    customerToken: player.customerToken,
   };
 }
 
@@ -2223,7 +2224,7 @@ async function buildCnMatchDetailView(
     info.gameMode || info.game_mode || info.mode || ""
   );
   const timeStr = formatMatchTimestamp(
-    info.beginTs || info.begin_ts || info.startTime || info.timestamp
+    info.beginTs || info.begin_ts || info.ts || info.startTime || info.timestamp
   );
 
   const playerStats =
@@ -2714,7 +2715,12 @@ function formatFinalRoastHtml(params: {
     : `⚡ 额度状态：已扣减 1 次（剩余 <b>${remainingQuota}</b> 次）`;
 
   const cleanBody = escapeHtml(aiContent.trim() || "模型未返回有效内容");
-  const modeNote = rKind === "match" ? "单局详情" : mode === "sport" ? "竞技比赛" : "快速/休闲";
+  const modeNote =
+    rKind === "match"
+      ? "单局详情"
+      : mode === "sport"
+        ? "竞技比赛"
+        : "快速/休闲";
 
   return (
     `${titleMap[rKind]} — <code>${escapeHtml(bnet)}</code>\n` +
@@ -2756,7 +2762,9 @@ async function callAiProviderDirect(
 
   const rawText = await res.text().catch(() => "");
   if (!res.ok) {
-    throw new Error(`AI 接口返回错误 (HTTP ${res.status})：${rawText.slice(0, 200)}`);
+    throw new Error(
+      `AI 接口返回错误 (HTTP ${res.status})：${rawText.slice(0, 200)}`
+    );
   }
 
   let parsed: any = null;
@@ -2776,7 +2784,8 @@ async function callAiProviderDirect(
     "";
 
   return {
-    content: typeof content === "string" ? content : JSON.stringify(content ?? ""),
+    content:
+      typeof content === "string" ? content : JSON.stringify(content ?? ""),
   };
 }
 
@@ -2843,7 +2852,11 @@ async function runVercelRoastTask(params: {
 
     const consumeRes = await consumeRoastQuotaForCtx(
       ctx,
-      rKind === "match" ? "roast_match" : rKind === "mmr" ? "roast_mmr" : "roast_self",
+      rKind === "match"
+        ? "roast_match"
+        : rKind === "mmr"
+          ? "roast_mmr"
+          : "roast_self",
       `${rKind}:${bnet}:${provider.name}`
     );
 
@@ -3234,7 +3247,11 @@ bot.command("start", async (ctx) => {
       `• 个人中心 / 签到 / 兑换：<code>/me</code>、<code>/checkin</code>、<code>/redeem 卡密</code>`,
     ];
 
-    if (regRes.isNewUser && regRes.settings.registerRewardEnabled && regRes.settings.registerRewardQuota > 0) {
+    if (
+      regRes.isNewUser &&
+      regRes.settings.registerRewardEnabled &&
+      regRes.settings.registerRewardQuota > 0
+    ) {
       welcomeLines.push(
         `🎁 <b>新用户福利：</b>已为你自动赠送 <b>+${regRes.settings.registerRewardQuota}</b> 次免费 AI 锐评！`
       );
@@ -3380,7 +3397,10 @@ async function renderAdminHomePanel(
   if (isSuper || permSet.has("quota:deduct")) {
     kb.text("➖ 扣次数", "ad:q_sub");
   }
-  if (kb.inline_keyboard.length === 0 || kb.inline_keyboard[kb.inline_keyboard.length - 1].length >= 3) {
+  if (
+    kb.inline_keyboard.length === 0 ||
+    kb.inline_keyboard[kb.inline_keyboard.length - 1].length >= 3
+  ) {
     kb.row();
   }
 
@@ -3517,7 +3537,9 @@ async function renderDashenAccountsPanel(
 
   const kb = new InlineKeyboard();
   if (accounts.length === 0) {
-    lines.push(`📭 当前轮询池暂无账号，请点击下方「➕ 粘贴请求头新增」添加。`);
+    lines.push(
+      `📭 当前轮询池暂无账号，请点击下方「➕ 粘贴请求头新增」添加。`
+    );
   } else {
     for (const acc of accounts) {
       const uaPreview = acc.userAgent
@@ -4306,10 +4328,14 @@ bot.on("callback_query:data", async (ctx) => {
       const parts = data.split(":");
       const accountId = Number(parts[2] ?? 0);
       const enabled = parts[3] === "1";
-      await relayInternalRequest("POST", "/internal/admin/dashen-accounts/toggle", {
-        operatorId: tgId,
-        json: { accountId, enabled },
-      });
+      await relayInternalRequest(
+        "POST",
+        "/internal/admin/dashen-accounts/toggle",
+        {
+          operatorId: tgId,
+          json: { accountId, enabled },
+        }
+      );
       await ctx.answerCallbackQuery({
         text: enabled ? "✅ 已启用轮询账号" : "⏸ 已停用轮询账号",
       });
@@ -5020,7 +5046,6 @@ bot.on("message:text", async (ctx, next) => {
       });
       const d = res.data;
 
-      // 保存成功后自动删除用户发送的明文密钥消息及机器人提示消息
       await ctx.deleteMessage().catch(() => {});
       const chatId = Number(ctx.chat?.id || ctx.from?.id || 0);
       if (chatId && act.promptMessageId) {
@@ -5072,7 +5097,6 @@ bot.on("message:text", async (ctx, next) => {
           ? `${parsedRes.parsed.authToken.slice(0, 6)}****${parsedRes.parsed.authToken.slice(-4)}`
           : "已配置";
 
-      // 保存成功后自动删除用户发送的含凭证请求头消息及机器人提示消息
       await ctx.deleteMessage().catch(() => {});
       const chatId = Number(ctx.chat?.id || ctx.from?.id || 0);
       if (chatId && act.promptMessageId) {
@@ -5167,7 +5191,7 @@ export default async function handler(
       JSON.stringify({
         ok: true,
         service: "ow2-cn-tg-bot",
-        generatedAt: "2026-11-28 13:20:00",
+        generatedAt: "2026-11-28 14:21:00",
         dockerCallbackEnabled: true,
       })
     );
