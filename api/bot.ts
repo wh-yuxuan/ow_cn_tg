@@ -1,11 +1,11 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 00:10:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 13:20:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
  * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool)
- *         + 腾讯云/Docker 业务中转与异步队列 (/internal/*)
+ *         + 腾讯云/Docker 业务中转与 Redis 9 号库分层缓存 (/internal/*)
  *         + 多 AI 渠道锐评（支持 Vercel 默认执行与 Docker 120s 异步队列回推）
  */
 
@@ -929,7 +929,7 @@ function resolveDashenHeroGuid(rawGuid: unknown): string {
 }
 
 // ============================================================================
-// 3. 网易大神与服务器内部业务 HTTP 客户端
+// 3. 网易大神与服务器内部业务 HTTP 客户端（含战网令牌缓存读写）
 // ============================================================================
 
 class DashenError extends Error {
@@ -1286,8 +1286,70 @@ async function dashenRequest<T = any>(
   );
 }
 
+/**
+ * 解析战网玩家信息与 customerToken（严格区分大小写）：
+ * 1. 先查询后端 Redis 9 号库 + MySQL 令牌缓存；命中则零消耗直接返回；
+ * 2. 未命中时轮询网易大神 searchBnetAccount 接口，拿到 token 后异步写入缓存（满 100 或 30 分钟同步 MySQL）。
+ */
+async function resolvePlayerWithTokenCache(rawBnet: string): Promise<{
+  bnet: string;
+  customerToken: string;
+  fromCache: boolean;
+}> {
+  const exactBnet = rawBnet.replace(/＃/g, "#").trim();
+  if (!exactBnet) {
+    throw new DashenError(400, "请输入有效的国服战网 ID。");
+  }
+
+  // 1. 优先查 Redis 9 号库 / MySQL 精确缓存（严格区分大小写）
+  try {
+    const cacheRes = await relayInternalRequest<{
+      ok: boolean;
+      hit?: boolean;
+      player?: {
+        bnetKey: string;
+        bnetName: string;
+        customerToken: string;
+      };
+    }>("GET", "/internal/dashen/player-cache", {
+      params: { bnet: exactBnet },
+    });
+
+    if (cacheRes?.hit && cacheRes.player?.customerToken) {
+      return {
+        bnet: cacheRes.player.bnetName || exactBnet,
+        customerToken: cacheRes.player.customerToken,
+        fromCache: true,
+      };
+    }
+  } catch (cacheErr) {
+    console.warn("[Bnet Player Cache Lookup Fallback]", cacheErr);
+  }
+
+  // 2. 缓存未命中：调用网易大神官方搜索接口
+  const searchRes = await searchBnetAccount(exactBnet);
+  const player = extractPlayerFromSearch(exactBnet, searchRes);
+
+  // 3. 将新查到的精确战网 ID 与 customerToken 存入 Redis 9 号库（满 100 或 30 分钟自动同步 MySQL）
+  void relayInternalRequest("POST", "/internal/dashen/player-cache", {
+    json: {
+      bnetKey: exactBnet,
+      bnetName: player.bnet || exactBnet,
+      customerToken: player.customerToken,
+    },
+  }).catch((saveErr) => {
+    console.warn("[Bnet Player Cache Save Warn]", saveErr);
+  });
+
+  return {
+    bnet: player.bnet || exactBnet,
+    customerToken: player.customerToken,
+    fromCache: false,
+  };
+}
+
 async function searchBnetAccount(bnet: string): Promise<DashenResponse> {
-  const normalized = bnet.replace("＃", "#").trim();
+  const normalized = bnet.replace(/＃/g, "#").trim();
   const candidates = await fetchRotatedDashenCandidates();
 
   const runSearchOnce = async (
@@ -1776,7 +1838,7 @@ function extractPlayerFromSearch(
   if (!matchedToken) {
     throw new DashenError(
       404,
-      `未找到国服战网账号 <code>${escapeHtml(queryBnet)}</code>（可能未绑定网易大神或搜索接口正在官方维护中，请稍后再试）。`
+      `未找到国服战网账号 <code>${escapeHtml(queryBnet)}</code>（注意区分大小写；若未绑定网易大神或搜索接口维护中请稍后再试）。`
     );
   }
 
@@ -1866,8 +1928,7 @@ async function buildCnOverviewView(
   snapshotText: string;
   currentRankLabel: string;
 }> {
-  const searchRes = await searchBnetAccount(bnet);
-  const player = extractPlayerFromSearch(bnet, searchRes);
+  const player = await resolvePlayerWithTokenCache(bnet);
 
   const [cardRes, countRes] = await Promise.all([
     queryCustomerCard(player.customerToken, mode).catch(() => null),
@@ -2055,8 +2116,7 @@ async function buildCnMatchListView(
   keyboard: InlineKeyboard;
   matchIds: string[];
 }> {
-  const searchRes = await searchBnetAccount(bnet);
-  const player = extractPlayerFromSearch(bnet, searchRes);
+  const player = await resolvePlayerWithTokenCache(bnet);
 
   const pageSize = 6;
   const listRes = await queryCustomerMatchList(
@@ -3242,7 +3302,7 @@ async function executeCnOverviewQuery(
   await ensureUserRegistered(ctx);
 
   const tokens = rawQuery.trim().split(/\s+/);
-  const bnet = tokens[0]?.replace("＃", "#").trim() || "";
+  const bnet = tokens[0]?.replace(/＃/g, "#").trim() || "";
   if (!bnet) return;
 
   const tgId = Number(ctx.from?.id || 0);
@@ -3507,7 +3567,7 @@ async function executeCnMatchListQuery(
   await ensureUserRegistered(ctx);
 
   const tokens = rawQuery.trim().split(/\s+/);
-  const bnet = tokens[0]?.replace("＃", "#").trim() || "";
+  const bnet = tokens[0]?.replace(/＃/g, "#").trim() || "";
   if (!bnet) return;
 
   const tgId = Number(ctx.from?.id || 0);
@@ -3562,7 +3622,7 @@ bot.command("cn", async (ctx) => {
         });
       }
       await ctx.reply(
-        `🇨🇳 <b>请输入要查询的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>，可选附带 <code>竞技</code> 或 <code>快速</code>）</i>`,
+        `🇨🇳 <b>请输入要查询的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>，注意区分大小写，可选附带 <code>竞技</code> 或 <code>快速</code>）</i>`,
         { parse_mode: "HTML" }
       );
       return;
@@ -3589,7 +3649,7 @@ bot.command("match", async (ctx) => {
         });
       }
       await ctx.reply(
-        `📋 <b>请输入要查询近期对局流水的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>）</i>`,
+        `📋 <b>请输入要查询近期对局流水的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>，注意区分大小写）</i>`,
         { parse_mode: "HTML" }
       );
       return;
@@ -3659,7 +3719,7 @@ bot.hears("🇨🇳 战绩查询", async (ctx) => {
     });
   }
   await ctx.reply(
-    `🇨🇳 <b>请输入要查询的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>，可选附带 <code>竞技</code> 或 <code>快速</code>）</i>`,
+    `🇨🇳 <b>请输入要查询的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>，注意区分大小写，可选附带 <code>竞技</code> 或 <code>快速</code>）</i>`,
     { parse_mode: "HTML" }
   );
 });
@@ -3673,7 +3733,7 @@ bot.hears("📋 战绩流水", async (ctx) => {
     });
   }
   await ctx.reply(
-    `📋 <b>请输入要查询近期对局流水的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>）</i>`,
+    `📋 <b>请输入要查询近期对局流水的国服战网 ID：</b>\n<i>（格式：<code>玩家昵称#51234</code>，注意区分大小写）</i>`,
     { parse_mode: "HTML" }
   );
 });
@@ -3754,8 +3814,7 @@ async function dispatchRoastWithProvider(params: {
   const operatorNickname = getOperatorDisplayLabel(ctx);
 
   try {
-    const searchRes = await searchBnetAccount(bnet);
-    const player = extractPlayerFromSearch(bnet, searchRes);
+    const player = await resolvePlayerWithTokenCache(bnet);
     let snapshotText = "";
     let currentRankLabel = "";
 
@@ -3916,8 +3975,7 @@ bot.on("callback_query:data", async (ctx) => {
         );
         return;
       }
-      const searchRes = await searchBnetAccount(bnet);
-      const player = extractPlayerFromSearch(bnet, searchRes);
+      const player = await resolvePlayerWithTokenCache(bnet);
       const { text, keyboard } = await buildCnMatchDetailView(
         player.bnet,
         player.customerToken,
@@ -5109,7 +5167,7 @@ export default async function handler(
       JSON.stringify({
         ok: true,
         service: "ow2-cn-tg-bot",
-        generatedAt: "2026-11-28 00:10:00",
+        generatedAt: "2026-11-28 13:20:00",
         dockerCallbackEnabled: true,
       })
     );
