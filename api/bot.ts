@@ -1,7 +1,5 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 16:13:00 (Asia/Shanghai)
- * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
  * 数据来源：服务器反代 (https://ow.eyy8.top -> datamsapi.ds.163.com/v1/a19ld5tool)
