@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 15:48:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 15:55:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -1620,7 +1620,7 @@ async function saveRoastCacheRecord(params: {
 }
 
 // ============================================================================
-// 6. 管理员与超级管理员接口封装（含候选用户列表、全量卡密查询、AI 渠道、轮询账号）
+// 6. 管理员与超级管理员接口封装（含候选用户列表、全量卡密查询、权限开关、AI 渠道、轮询账号）
 // ============================================================================
 
 async function fetchAdminMe(operatorId: number): Promise<AdminMeDto | null> {
@@ -1934,6 +1934,22 @@ async function superCreateAdmin(
   return res.data;
 }
 
+async function superToggleAdminPermItem(
+  operatorId: number,
+  targetTgId: number,
+  permCode: string
+) {
+  const res = await relayInternalRequest<{ ok: boolean; data: any }>(
+    "/internal/admin/admins/permission",
+    {
+      method: "POST",
+      operatorId,
+      body: { targetTgId, permCode },
+    }
+  );
+  return res.data;
+}
+
 async function superPatchAdminMeta(
   operatorId: number,
   targetTgId: number,
@@ -1960,6 +1976,88 @@ async function superRemoveAdmin(operatorId: number, targetTgId: number) {
     }
   );
   return res.data;
+}
+
+async function showAdminsPermissionPanel(
+  ctx: Context,
+  operatorId: number,
+  editMessage = true
+): Promise<void> {
+  const d = await superFetchAdminsList(operatorId);
+  const list = Array.isArray(d?.admins) ? d.admins : [];
+  const allPerms =
+    Array.isArray(d?.allPermissions) && d.allPermissions.length > 0
+      ? d.allPermissions
+      : ALL_ADMIN_PERMISSIONS;
+  const permLabelsMap: Record<string, string> =
+    d?.permissionLabels && typeof d.permissionLabels === "object"
+      ? d.permissionLabels
+      : PERMISSION_LABELS;
+
+  const lines: string[] = [
+    `🧩 <b>管理员与权限管理</b>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    `点击下方普通管理员的权限开关按钮即可实时开启或关闭对应权限：`,
+  ];
+
+  const kb = new InlineKeyboard();
+
+  for (const a of list) {
+    const roleTag = a.role === "super_admin" ? "👑超管" : "🛡管理";
+    const stTag = a.isActive ? "✅启用" : "⏸停用";
+    const perms = Array.isArray(a.permissions) ? a.permissions : [];
+    const permNamesText =
+      a.role === "super_admin"
+        ? "全部权限"
+        : perms.map((p: string) => permLabelsMap[p] || p).join("、") || "无";
+
+    lines.push(
+      `\n• ${roleTag} <b>${escapeHtml(a.remark || String(a.tgId))}</b> (<code>${Number(a.tgId)}</code>) [${stTag}]`,
+      `  已开权限：<i>${escapeHtml(permNamesText)}</i>`
+    );
+
+    if (a.role !== "super_admin") {
+      const uid = Number(a.tgId);
+      allPerms.forEach((permCode: string, idx: number) => {
+        const enabled = perms.includes(permCode);
+        const label = permLabelsMap[permCode] || permCode;
+        kb.text(
+          `${enabled ? "✅" : "⬜"} ${label}`,
+          `sup:adm:perm:${uid}:${permCode}`
+        );
+        if (idx % 2 === 1) {
+          kb.row();
+        }
+      });
+      if (allPerms.length % 2 === 1) {
+        kb.row();
+      }
+
+      kb.text(
+        a.isActive ? `⏸ 停用 ${uid}` : `▶️ 启用 ${uid}`,
+        `sup:adm:tgl:${uid}`
+      )
+        .text(`🗑 移除 ${uid}`, `sup:adm:del:${uid}`)
+        .row();
+    }
+  }
+
+  kb.text("➕ 添加管理员", "sup:adm:add")
+    .text("🔄 刷新权限", "sup:admins")
+    .row()
+    .text("🔙 返回控制台", "adm:home");
+
+  const text = lines.join("\n");
+  if (editMessage && ctx.callbackQuery?.message) {
+    await safeEditTextMessage(
+      ctx,
+      text,
+      { parse_mode: "HTML", reply_markup: kb },
+      "权限列表已是最新"
+    );
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
 }
 
 async function superFetchAuditLogs(
@@ -3838,7 +3936,7 @@ async function executeCnMatchListQuery(
 }
 
 // ============================================================================
-// 11. 管理员控制台与超级管理员面板（含🔑 大神账号轮询）
+// 11. 管理员控制台与超级管理员面板（含权限逐项开关、每页 10 人用户分页、🔑 大神账号轮询）
 // ============================================================================
 
 function buildAdminHomeKeyboard(adminMe: AdminMeDto): InlineKeyboard {
@@ -4623,38 +4721,20 @@ bot.on("callback_query", async (ctx) => {
 
     if (data === "sup:admins") {
       await ctx.answerCallbackQuery();
-      const d = await superFetchAdminsList(tgId);
-      const list = d.admins || [];
-      const lines = [
-        `🧩 <b>管理员与权限管理</b>`,
-        `━━━━━━━━━━━━━━━━━━`,
-      ];
-      const kb = new InlineKeyboard();
-      for (const a of list) {
-        const roleTag = a.role === "super_admin" ? "👑超管" : "🛡管理";
-        const stTag = a.isActive ? "✅启用" : "⏸停用";
-        lines.push(
-          `• ${roleTag} <b>${escapeHtml(a.remark || String(a.tgId))}</b> (<code>${a.tgId}</code>) [${stTag}]`
-        );
-        if (a.role !== "super_admin") {
-          kb.text(
-            a.isActive ? `⏸ 停用 ${a.tgId}` : `▶️ 启用 ${a.tgId}`,
-            `sup:adm:tgl:${a.tgId}`
-          )
-            .text(`🗑 移除 ${a.tgId}`, `sup:adm:del:${a.tgId}`)
-            .row();
-        }
+      await showAdminsPermissionPanel(ctx, tgId, true);
+      return;
+    }
+
+    if (data.startsWith("sup:adm:perm:")) {
+      await ctx.answerCallbackQuery({ text: "正在切换权限..." });
+      const rest = data.slice("sup:adm:perm:".length);
+      const colonIdx = rest.indexOf(":");
+      if (colonIdx > 0) {
+        const targetId = Number(rest.slice(0, colonIdx));
+        const permCode = rest.slice(colonIdx + 1);
+        await superToggleAdminPermItem(tgId, targetId, permCode);
       }
-      kb.text("➕ 添加管理员", "sup:adm:add").text("🔙 返回控制台", "adm:home");
-      await safeEditTextMessage(
-        ctx,
-        lines.join("\n"),
-        {
-          parse_mode: "HTML",
-          reply_markup: kb,
-        },
-        "列表已是最新"
-      );
+      await showAdminsPermissionPanel(ctx, tgId, true);
       return;
     }
 
@@ -4678,14 +4758,7 @@ bot.on("callback_query", async (ctx) => {
       await superPatchAdminMeta(tgId, targetId, {
         isActive: !(found?.isActive ?? true),
       });
-      await safeEditTextMessage(
-        ctx,
-        "✅ 管理员状态已更新。",
-        {
-          reply_markup: new InlineKeyboard().text("🔙 返回列表", "sup:admins"),
-        },
-        "状态已是最新"
-      );
+      await showAdminsPermissionPanel(ctx, tgId, true);
       return;
     }
 
@@ -4693,14 +4766,7 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCallbackQuery();
       const targetId = Number(data.slice("sup:adm:del:".length));
       await superRemoveAdmin(tgId, targetId);
-      await safeEditTextMessage(
-        ctx,
-        "✅ 已移除该普通管理员。",
-        {
-          reply_markup: new InlineKeyboard().text("🔙 返回列表", "sup:admins"),
-        },
-        "列表已是最新"
-      );
+      await showAdminsPermissionPanel(ctx, tgId, true);
       return;
     }
 
