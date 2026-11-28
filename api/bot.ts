@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 14:32:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 14:43:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -1211,6 +1211,38 @@ function resolveGuideCountSection(
   }
 
   return { section: guide, roleKey: "" };
+}
+
+function extractMatchItemsFromBody(body: any): any[] {
+  if (!body) return [];
+  if (Array.isArray(body)) return body;
+  if (typeof body !== "object") return [];
+
+  const directKeys = [
+    "list",
+    "records",
+    "matches",
+    "matchList",
+    "match_list",
+    "items",
+    "dataList",
+    "gameList",
+  ];
+  for (const k of directKeys) {
+    if (Array.isArray(body[k])) return body[k];
+  }
+
+  for (const val of Object.values(body)) {
+    if (Array.isArray(val) && val.length > 0 && typeof val[0] === "object") {
+      return val;
+    }
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      for (const nk of directKeys) {
+        if (Array.isArray((val as any)[nk])) return (val as any)[nk];
+      }
+    }
+  }
+  return [];
 }
 
 function maskTokenDisplay(token: string): string {
@@ -2737,15 +2769,8 @@ async function buildCnMatchListView(
     page,
     pageSize
   );
-  const body = listRes?.data ?? listRes?.result ?? {};
-  const rawList = Array.isArray(body)
-    ? body
-    : body.list ||
-      body.records ||
-      body.matches ||
-      body.matchList ||
-      body.items ||
-      [];
+  const body = listRes?.data ?? listRes?.result ?? listRes ?? {};
+  const rawList = extractMatchItemsFromBody(body);
 
   const modeLabel = mode === "sport" ? "竞技比赛" : "快速/休闲";
   const lines: string[] = [
@@ -2759,7 +2784,10 @@ async function buildCnMatchListView(
   const kb = new InlineKeyboard();
 
   if (!Array.isArray(rawList) || rawList.length === 0) {
-    lines.push(`📭 当前页暂无对局记录。`);
+    lines.push(
+      `📭 当前模式（${escapeHtml(modeLabel)}）暂无对局记录。`,
+      `<i>可尝试点击下方按钮切换另一模式查看。</i>`
+    );
   } else {
     rawList.forEach((m: any, idx: number) => {
       const mId = String(
@@ -3611,7 +3639,8 @@ async function executeCnMatchListQuery(
   ctx: Context,
   rawQuery: string,
   page = 1,
-  editMessage = false
+  editMessage = false,
+  explicitMode?: CnGameMode
 ): Promise<void> {
   const tgId = ctx.from?.id || 0;
   const cleanQ = normalizeBnetQuery(rawQuery);
@@ -3626,7 +3655,8 @@ async function executeCnMatchListQuery(
   if (!editMessage) {
     await ctx.replyWithChatAction("typing");
   }
-  const mode: CnGameMode = (tgId > 0 ? userLastMode.get(tgId) : null) || "sport";
+  const mode: CnGameMode =
+    explicitMode || (tgId > 0 ? userLastMode.get(tgId) : null) || "sport";
   const { text, keyboard, matchIds, matchSummaries } = await buildCnMatchListView(
     cleanQ,
     mode,
@@ -4027,7 +4057,7 @@ bot.on("callback_query", async (ctx) => {
       const page = Math.max(1, Number(parts[3] || 1));
       const bnet = parts.slice(4).join(":");
       userLastMode.set(tgId, mode);
-      await executeCnMatchListQuery(ctx, bnet, page, true);
+      await executeCnMatchListQuery(ctx, bnet, page, true, mode);
       return;
     }
 
