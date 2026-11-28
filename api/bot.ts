@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 14:43:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 15:05:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -1171,9 +1171,19 @@ function translateRoleType(roleVal: unknown): string {
 function translateModeCode(modeVal: unknown): string {
   const s = String(modeVal || "").trim().toLowerCase();
   if (!s) return "";
-  if (s === "sport" || s === "sportopen" || s.includes("comp") || s.includes("竞技"))
+  if (
+    s === "sport" ||
+    s === "sportopen" ||
+    s.includes("comp") ||
+    s.includes("竞技")
+  )
     return "竞技比赛";
-  if (s === "leisure" || s.includes("quick") || s.includes("快速") || s.includes("休闲"))
+  if (
+    s === "leisure" ||
+    s.includes("quick") ||
+    s.includes("快速") ||
+    s.includes("休闲")
+  )
     return "快速/休闲";
   return String(modeVal);
 }
@@ -1250,6 +1260,30 @@ function maskTokenDisplay(token: string): string {
   if (!t) return "未配置";
   if (t.length <= 8) return `${t.slice(0, 2)}****`;
   return `${t.slice(0, 6)}****${t.slice(-4)}`;
+}
+
+async function safeEditTextMessage(
+  ctx: Context,
+  text: string,
+  extra: Parameters<Context["editMessageText"]>[1],
+  unchangedToast = "内容已是最新"
+): Promise<void> {
+  if (!ctx.callbackQuery?.message) {
+    await ctx.reply(text, extra as any);
+    return;
+  }
+  try {
+    await ctx.editMessageText(text, extra);
+  } catch (err: any) {
+    const errMsg = String(err?.message || err || "");
+    if (errMsg.includes("message is not modified")) {
+      await ctx
+        .answerCallbackQuery({ text: unchangedToast, show_alert: false })
+        .catch(() => {});
+      return;
+    }
+    throw err;
+  }
 }
 
 // ============================================================================
@@ -2013,9 +2047,17 @@ function parseRawDashenHeadersInput(rawText: string): {
       const val = line.slice(colonIdx + 1).trim();
       if (!val) continue;
 
-      if (key === "gl-bigdata-auth-token" || key === "auth-token" || key === "token") {
+      if (
+        key === "gl-bigdata-auth-token" ||
+        key === "auth-token" ||
+        key === "token"
+      ) {
         out.authToken = val;
-      } else if (key === "gl-bigdata-role-id" || key === "role-id" || key === "roleid") {
+      } else if (
+        key === "gl-bigdata-role-id" ||
+        key === "role-id" ||
+        key === "roleid"
+      ) {
         const rid = Number(val);
         if (Number.isSafeInteger(rid) && rid > 0) out.roleId = rid;
       } else if (key === "gl-bigdata-dts" || key === "dts") {
@@ -3229,7 +3271,10 @@ async function runDockerQueueCompletion(
     throw new Error(`${channel.name} 队列入队失败`);
   }
 
-  if (onQueuedNotice && (enqRes.data.aheadCount > 0 || enqRes.data.status === "queued")) {
+  if (
+    onQueuedNotice &&
+    (enqRes.data.aheadCount > 0 || enqRes.data.status === "queued")
+  ) {
     await onQueuedNotice({
       aheadCount: Number(enqRes.data.aheadCount || 0),
       queuePosition: Number(enqRes.data.queuePosition || 1),
@@ -3671,10 +3716,15 @@ async function executeCnMatchListQuery(
   }
 
   if (editMessage && ctx.callbackQuery?.message) {
-    await ctx.editMessageText(text, {
-      parse_mode: "HTML",
-      reply_markup: keyboard,
-    });
+    await safeEditTextMessage(
+      ctx,
+      text,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      },
+      "流水已是最新"
+    );
   } else {
     await ctx.reply(text, {
       parse_mode: "HTML",
@@ -3776,7 +3826,12 @@ async function openAdminConsole(ctx: Context, editMessage = false): Promise<void
 
   const kb = buildAdminHomeKeyboard(me);
   if (editMessage && ctx.callbackQuery?.message) {
-    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+    await safeEditTextMessage(
+      ctx,
+      text,
+      { parse_mode: "HTML", reply_markup: kb },
+      "控制台已是最新"
+    );
   } else {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
   }
@@ -3798,7 +3853,9 @@ async function showDashenAccountsPanel(
   const kb = new InlineKeyboard();
 
   if (accounts.length === 0) {
-    lines.push(`\n📭 暂无轮询账号，请点击下方「➕ 添加大神账号」粘贴 Raw 请求头录入。`);
+    lines.push(
+      `\n📭 暂无轮询账号，请点击下方「➕ 添加大神账号」粘贴 Raw 请求头录入。`
+    );
   } else {
     for (const acc of accounts) {
       const statusIcon = acc.isEnabled ? "✅启用" : "⏸停用";
@@ -3828,7 +3885,12 @@ async function showDashenAccountsPanel(
 
   const text = lines.join("\n");
   if (editMessage && ctx.callbackQuery?.message) {
-    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+    await safeEditTextMessage(
+      ctx,
+      text,
+      { parse_mode: "HTML", reply_markup: kb },
+      "列表已是最新"
+    );
   } else {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
   }
@@ -3922,7 +3984,11 @@ bot.command("start", async (ctx) => {
       `• <code>/redeem 卡密</code> — 兑换次数或 VIP 卡密`,
     ];
 
-    if (regRes.isNewUser && regRes.settings.registerRewardEnabled && regRes.settings.registerRewardQuota > 0) {
+    if (
+      regRes.isNewUser &&
+      regRes.settings.registerRewardEnabled &&
+      regRes.settings.registerRewardQuota > 0
+    ) {
       welcomeLines.push(
         `━━━━━━━━━━━━━━━━━━`,
         `🎁 新用户注册已赠送 <b>+${regRes.settings.registerRewardQuota}</b> 次 AI 锐评次数！`
@@ -4026,10 +4092,15 @@ bot.on("callback_query", async (ctx) => {
       );
       userLastMode.set(tgId, nextMode);
       userLastBnet.set(tgId, bnet);
-      await ctx.editMessageText(view.text, {
-        parse_mode: "HTML",
-        reply_markup: view.keyboard,
-      });
+      await safeEditTextMessage(
+        ctx,
+        view.text,
+        {
+          parse_mode: "HTML",
+          reply_markup: view.keyboard,
+        },
+        "总览已是最新"
+      );
       return;
     }
 
@@ -4043,10 +4114,15 @@ bot.on("callback_query", async (ctx) => {
         mode,
         Boolean(adminMe?.isActive)
       );
-      await ctx.editMessageText(view.text, {
-        parse_mode: "HTML",
-        reply_markup: view.keyboard,
-      });
+      await safeEditTextMessage(
+        ctx,
+        view.text,
+        {
+          parse_mode: "HTML",
+          reply_markup: view.keyboard,
+        },
+        "总览已是最新"
+      );
       return;
     }
 
@@ -4083,10 +4159,15 @@ bot.on("callback_query", async (ctx) => {
         matchId,
         matchSummaries[matchId] || null
       );
-      await ctx.editMessageText(text, {
-        parse_mode: "HTML",
-        reply_markup: keyboard,
-      });
+      await safeEditTextMessage(
+        ctx,
+        text,
+        {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        },
+        "详情已是最新"
+      );
       return;
     }
 
@@ -4152,10 +4233,15 @@ bot.on("callback_query", async (ctx) => {
         `• 今日锐评消耗：<b>${st.todayTotalRoasts}</b> 次（免费 ${st.todayFreeRoasts} / 付费 ${st.todayPaidRoasts}）`,
         `• 未使用卡密：<b>${st.unusedRedeemCodes}</b> 张`,
       ].join("\n");
-      await ctx.editMessageText(text, {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("🔙 返回控制台", "adm:home"),
-      });
+      await safeEditTextMessage(
+        ctx,
+        text,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🔙 返回控制台", "adm:home"),
+        },
+        "统计已是最新"
+      );
       return;
     }
 
@@ -4226,13 +4312,18 @@ bot.on("callback_query", async (ctx) => {
 
     if (data === "adm:r:create") {
       await ctx.answerCallbackQuery();
-      await ctx.editMessageText("🎟 请选择要生成的卡密类型：", {
-        reply_markup: new InlineKeyboard()
-          .text("🎫 锐评次数卡密", "adm:r:c:quota")
-          .text("👑 VIP 天数卡密", "adm:r:c:vip_days")
-          .row()
-          .text("🔙 返回控制台", "adm:home"),
-      });
+      await safeEditTextMessage(
+        ctx,
+        "🎟 请选择要生成的卡密类型：",
+        {
+          reply_markup: new InlineKeyboard()
+            .text("🎫 锐评次数卡密", "adm:r:c:quota")
+            .text("👑 VIP 天数卡密", "adm:r:c:vip_days")
+            .row()
+            .text("🔙 返回控制台", "adm:home"),
+        },
+        "面板已是最新"
+      );
       return;
     }
 
@@ -4312,7 +4403,12 @@ bot.on("callback_query", async (ctx) => {
         .row()
         .text("🔙 返回控制台", "adm:home");
 
-      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+      await safeEditTextMessage(
+        ctx,
+        text,
+        { parse_mode: "HTML", reply_markup: kb },
+        "设置已是最新"
+      );
       return;
     }
 
@@ -4321,13 +4417,11 @@ bot.on("callback_query", async (ctx) => {
       const sub = data.slice("sup:st:".length);
       const st = await superFetchSettings(tgId);
       if (sub === "toggle_maint") {
-        await superPatchSettings(tgId, {
+        const refreshed = await superPatchSettings(tgId, {
           botStatus: st.botStatus === "maintenance" ? "normal" : "maintenance",
         });
-        await ctx.callbackQuery &&
-          (ctx.callbackQuery.data = "sup:settings");
-        const refreshed = await superFetchSettings(tgId);
-        await ctx.editMessageText(
+        await safeEditTextMessage(
+          ctx,
           `✅ 机器人状态已更新为：<b>${refreshed.botStatus === "maintenance" ? "🛠 维护中" : "✅ 正常运行"}</b>`,
           {
             parse_mode: "HTML",
@@ -4335,7 +4429,8 @@ bot.on("callback_query", async (ctx) => {
               "🔙 返回设置",
               "sup:settings"
             ),
-          }
+          },
+          "状态已是最新"
         );
         return;
       }
@@ -4343,27 +4438,42 @@ bot.on("callback_query", async (ctx) => {
         await superPatchSettings(tgId, {
           registerRewardEnabled: !st.registerRewardEnabled,
         });
-        await ctx.editMessageText("✅ 新注册赠送开关已更新。", {
-          reply_markup: new InlineKeyboard().text("🔙 返回设置", "sup:settings"),
-        });
+        await safeEditTextMessage(
+          ctx,
+          "✅ 新注册赠送开关已更新。",
+          {
+            reply_markup: new InlineKeyboard().text("🔙 返回设置", "sup:settings"),
+          },
+          "开关已是最新"
+        );
         return;
       }
       if (sub === "tgl_inv") {
         await superPatchSettings(tgId, {
           inviteRewardEnabled: !st.inviteRewardEnabled,
         });
-        await ctx.editMessageText("✅ 邀请赠送开关已更新。", {
-          reply_markup: new InlineKeyboard().text("🔙 返回设置", "sup:settings"),
-        });
+        await safeEditTextMessage(
+          ctx,
+          "✅ 邀请赠送开关已更新。",
+          {
+            reply_markup: new InlineKeyboard().text("🔙 返回设置", "sup:settings"),
+          },
+          "开关已是最新"
+        );
         return;
       }
       if (sub === "tgl_chk") {
         await superPatchSettings(tgId, {
           checkinRewardEnabled: !st.checkinRewardEnabled,
         });
-        await ctx.editMessageText("✅ 签到赠送开关已更新。", {
-          reply_markup: new InlineKeyboard().text("🔙 返回设置", "sup:settings"),
-        });
+        await safeEditTextMessage(
+          ctx,
+          "✅ 签到赠送开关已更新。",
+          {
+            reply_markup: new InlineKeyboard().text("🔙 返回设置", "sup:settings"),
+          },
+          "开关已是最新"
+        );
         return;
       }
       if (sub === "val_reg" || sub === "val_inv" || sub === "val_chk") {
@@ -4408,10 +4518,15 @@ bot.on("callback_query", async (ctx) => {
         }
       }
       kb.text("➕ 添加管理员", "sup:adm:add").text("🔙 返回控制台", "adm:home");
-      await ctx.editMessageText(lines.join("\n"), {
-        parse_mode: "HTML",
-        reply_markup: kb,
-      });
+      await safeEditTextMessage(
+        ctx,
+        lines.join("\n"),
+        {
+          parse_mode: "HTML",
+          reply_markup: kb,
+        },
+        "列表已是最新"
+      );
       return;
     }
 
@@ -4438,9 +4553,14 @@ bot.on("callback_query", async (ctx) => {
       await superPatchAdminMeta(tgId, targetId, {
         isActive: !(found?.isActive ?? true),
       });
-      await ctx.editMessageText("✅ 管理员状态已更新。", {
-        reply_markup: new InlineKeyboard().text("🔙 返回列表", "sup:admins"),
-      });
+      await safeEditTextMessage(
+        ctx,
+        "✅ 管理员状态已更新。",
+        {
+          reply_markup: new InlineKeyboard().text("🔙 返回列表", "sup:admins"),
+        },
+        "状态已是最新"
+      );
       return;
     }
 
@@ -4448,9 +4568,14 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCallbackQuery();
       const targetId = Number(data.slice("sup:adm:del:".length));
       await superRemoveAdmin(tgId, targetId);
-      await ctx.editMessageText("✅ 已移除该普通管理员。", {
-        reply_markup: new InlineKeyboard().text("🔙 返回列表", "sup:admins"),
-      });
+      await safeEditTextMessage(
+        ctx,
+        "✅ 已移除该普通管理员。",
+        {
+          reply_markup: new InlineKeyboard().text("🔙 返回列表", "sup:admins"),
+        },
+        "列表已是最新"
+      );
       return;
     }
 
@@ -4477,10 +4602,15 @@ bot.on("callback_query", async (ctx) => {
         kb.text("➡️ 下一页", `sup:logs:${logsData.page + 1}`);
       }
       kb.row().text("🔙 返回控制台", "adm:home");
-      await ctx.editMessageText(lines.join("\n"), {
-        parse_mode: "HTML",
-        reply_markup: kb,
-      });
+      await safeEditTextMessage(
+        ctx,
+        lines.join("\n"),
+        {
+          parse_mode: "HTML",
+          reply_markup: kb,
+        },
+        "日志已是最新"
+      );
       return;
     }
 
@@ -4521,10 +4651,15 @@ bot.on("callback_query", async (ctx) => {
         .text("➕ 添加 AI 渠道", "sup:ai:add")
         .text("🔙 返回控制台", "adm:home");
 
-      await ctx.editMessageText(lines.join("\n"), {
-        parse_mode: "HTML",
-        reply_markup: kb,
-      });
+      await safeEditTextMessage(
+        ctx,
+        lines.join("\n"),
+        {
+          parse_mode: "HTML",
+          reply_markup: kb,
+        },
+        "渠道已是最新"
+      );
       return;
     }
 
@@ -4545,9 +4680,17 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCallbackQuery();
       const pid = Number(data.slice("sup:ai:tgl:".length));
       await superToggleAiProviderById(tgId, pid);
-      await ctx.editMessageText("✅ AI 渠道开关已更新。", {
-        reply_markup: new InlineKeyboard().text("🔙 返回渠道列表", "sup:ai:menu"),
-      });
+      await safeEditTextMessage(
+        ctx,
+        "✅ AI 渠道开关已更新。",
+        {
+          reply_markup: new InlineKeyboard().text(
+            "🔙 返回渠道列表",
+            "sup:ai:menu"
+          ),
+        },
+        "状态已是最新"
+      );
       return;
     }
 
@@ -4557,9 +4700,17 @@ bot.on("callback_query", async (ctx) => {
       const pid = Number(parts[3]);
       const nextTarget = parts[4] === "docker" ? "docker" : "vercel";
       await superSwitchAiProviderTarget(tgId, pid, nextTarget);
-      await ctx.editMessageText("✅ AI 渠道执行节点已切换。", {
-        reply_markup: new InlineKeyboard().text("🔙 返回渠道列表", "sup:ai:menu"),
-      });
+      await safeEditTextMessage(
+        ctx,
+        "✅ AI 渠道执行节点已切换。",
+        {
+          reply_markup: new InlineKeyboard().text(
+            "🔙 返回渠道列表",
+            "sup:ai:menu"
+          ),
+        },
+        "节点已是最新"
+      );
       return;
     }
 
@@ -4585,9 +4736,17 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCallbackQuery();
       const pid = Number(data.slice("sup:ai:del:".length));
       await superDeleteAiProviderById(tgId, pid);
-      await ctx.editMessageText("✅ AI 渠道已删除。", {
-        reply_markup: new InlineKeyboard().text("🔙 返回渠道列表", "sup:ai:menu"),
-      });
+      await safeEditTextMessage(
+        ctx,
+        "✅ AI 渠道已删除。",
+        {
+          reply_markup: new InlineKeyboard().text(
+            "🔙 返回渠道列表",
+            "sup:ai:menu"
+          ),
+        },
+        "列表已是最新"
+      );
       return;
     }
 
