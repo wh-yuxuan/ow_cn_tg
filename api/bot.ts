@@ -1,6 +1,6 @@
 /**
  * 《守望先锋 2》(OW2) 国服战绩查询 Telegram 机器人（完整独立部署版）
- * 代码生成时间：2026-11-28 15:05:00 (Asia/Shanghai)
+ * 代码生成时间：2026-11-28 15:27:00 (Asia/Shanghai)
  * 项目地址：https://github.com/AddOneSecondL/Overstats 开源的
  * 运行环境：Vercel Serverless Functions (Node.js 20+ / TypeScript)
  * 机器人框架：grammY (Webhook 模式)
@@ -47,12 +47,6 @@ const DASHEN_RELAY_ORIGIN = (
 ).replace(/\/+$/, "");
 
 const RELAY_SECRET = (process.env.RELAY_SECRET || "").trim();
-const VERCEL_PUBLIC_ORIGIN = (
-  process.env.VERCEL_PUBLIC_ORIGIN ||
-  (process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : "https://owcntg.vercel.app")
-).replace(/\/+$/, "");
 
 const DASHEN_API_ROOT =
   process.env.DASHEN_API_ROOT?.replace(/\/+$/, "") ||
@@ -88,10 +82,6 @@ const DOCKER_AI_TIMEOUT_MS = 120_000;
 const API_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS || "12000");
 const RELAY_TIMEOUT_MS = Number(process.env.RELAY_TIMEOUT_MS || "10000");
 
-const DEFAULT_REGISTER_QUOTA = 3;
-const CHECKIN_REWARD_QUOTA = 1;
-const INVITE_REWARD_QUOTA = 1;
-
 const userLastMode = new Map<number, CnGameMode>();
 const userLastBnet = new Map<number, string>();
 const userRecentMatchIds = new Map<number, string[]>();
@@ -111,7 +101,6 @@ type PendingUserAction =
   | { type: "admin_redeem_view" }
   | { type: "admin_redeem_void" }
   | { type: "super_admin_add" }
-  | { type: "super_admin_remark"; targetTgId: number }
   | { type: "super_setting_reg_quota" }
   | { type: "super_setting_inv_quota" }
   | { type: "super_setting_chk_quota" }
@@ -228,7 +217,7 @@ interface AiProviderDto {
 }
 
 // ============================================================================
-// 2. 英雄 / 地图 / 段位 / 指标 映射表
+// 2. 英雄 / 地图 / 段位 映射表
 // ============================================================================
 
 const DASHEN_HERO_ALIASES: Record<string, string[]> = {
@@ -906,37 +895,6 @@ const DASHEN_MAP_NAMES: Record<string, string> = {
   "0x0800000000001356": "暴雪世界",
 };
 
-const DASHEN_STAT_GUIDS: Record<string, string> = {
-  "603482350067646495": "消灭",
-  "603482350067646506": "阵亡",
-  "603482350067646507": "助攻",
-  "603482350067646913": "治疗量",
-  "603482350067647671": "对英雄伤害量",
-  "603482350067646485": "伤害量",
-  "603482350067646482": "最后一击",
-  "603482350067646499": "单独击杀",
-  "603482350067646512": "暴击命中",
-  "603482350067646515": "武器命中率",
-  "603482350067646523": "准星命中",
-  "603482350067646909": "承受伤害",
-  "603482350067646924": "伤害减免",
-  "603482350067647292": "目标占领时间",
-  "603482350067647294": "护送时间",
-  "603482350067647311": "环境击杀",
-  "603482350067647338": "终极技能消耗",
-  "603482350067647669": "地形击杀",
-  "603482350067647683": "法术伤害",
-  "603482350067647684": "武器伤害",
-  "603482350067647858": "救济",
-  "603482350067647864": "技能命中",
-  "603482350067648096": "技能伤害",
-  "603482350067648392": "总伤害",
-  "603482350067646500": "单次最高击杀",
-  "603482350067646502": "最高连杀",
-  "603482350067647672": "单局最高英雄伤害",
-  "603482350067646914": "单局最高治疗",
-};
-
 const DASHEN_RANK_TIERS: Record<string, string> = {
   bronze: "青铜",
   silver: "白银",
@@ -973,7 +931,7 @@ const PERMISSION_LABELS: Record<string, string> = {
 const ALL_ADMIN_PERMISSIONS = Object.keys(PERMISSION_LABELS);
 
 // ============================================================================
-// 3. 基础工具与文本格式化
+// 3. 基础工具、消息防重复编辑与格式化辅助
 // ============================================================================
 
 function escapeHtml(text: unknown): string {
@@ -1286,6 +1244,37 @@ async function safeEditTextMessage(
   }
 }
 
+function formatUserNameWithId(u: any): string {
+  const nick =
+    String(u?.nickname || "").trim() ||
+    (u?.username ? `@${u.username}` : `TG#${u?.tgId || ""}`);
+  return `${nick}-${Number(u?.tgId || 0)}`;
+}
+
+function formatRedeemTypeLabel(rewardType: unknown): string {
+  const t = String(rewardType || "").trim();
+  if (t === "vip_days") return "VIP 天数卡密";
+  return "锐评次数卡密";
+}
+
+function formatRedeemRewardText(
+  rewardType: unknown,
+  rewardValue: unknown
+): string {
+  const val = Number(rewardValue || 0);
+  if (String(rewardType || "").trim() === "vip_days") {
+    return `${val} 天`;
+  }
+  return `+${val} 次`;
+}
+
+function formatRedeemStatusLabel(status: unknown): string {
+  const s = String(status || "").trim().toLowerCase();
+  if (s === "used") return "✅ 已使用";
+  if (s === "voided") return "🚫 已作废";
+  return "🟢 未使用";
+}
+
 // ============================================================================
 // 4. 敏感消息自动删除工具
 // ============================================================================
@@ -1376,6 +1365,56 @@ async function relayInternalRequest<T = any>(
   }
 
   return parsed as T;
+}
+
+async function lookupCachedBnetPlayer(
+  exactBnet: string
+): Promise<{ bnetName: string; customerToken: string } | null> {
+  try {
+    const res = await relayInternalRequest<{
+      ok: boolean;
+      hit: boolean;
+      player?: {
+        bnetKey?: string;
+        bnetName?: string;
+        customerToken?: string;
+      } | null;
+    }>("/internal/dashen/player-cache", {
+      method: "GET",
+      query: { bnet: exactBnet },
+      timeoutMs: 6000,
+    });
+    const token = String(res?.player?.customerToken || "").trim();
+    if (res?.hit && token) {
+      return {
+        bnetName: String(res.player?.bnetName || exactBnet).trim() || exactBnet,
+        customerToken: token,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function persistCachedBnetPlayer(params: {
+  bnetKey: string;
+  bnetName: string;
+  customerToken: string;
+}): Promise<void> {
+  try {
+    await relayInternalRequest("/internal/dashen/player-cache", {
+      method: "POST",
+      body: {
+        bnetKey: params.bnetKey,
+        bnetName: params.bnetName,
+        customerToken: params.customerToken,
+      },
+      timeoutMs: 6000,
+    });
+  } catch {
+    // 忽略缓存写入异常
+  }
 }
 
 async function ensureUserRegistered(
@@ -1568,75 +1607,16 @@ async function saveRoastCacheRecord(params: {
 }
 
 // ============================================================================
-// 5.2 战网玩家令牌缓存（精确区分大小写）
+// 6. 管理员与超级管理员接口封装（含候选用户列表、全量卡密查询、AI 渠道、轮询账号）
 // ============================================================================
 
-async function lookupCachedBnetPlayer(exactBnet: string): Promise<{
-  bnetKey: string;
-  bnetName: string;
-  customerToken: string;
-  source?: string;
-} | null> {
-  const b = String(exactBnet || "").replace(/＃/g, "#").trim();
-  if (!b) return null;
-  try {
-    const res = await relayInternalRequest<{
-      ok: boolean;
-      hit: boolean;
-      player?: {
-        bnetKey: string;
-        bnetName: string;
-        customerToken: string;
-        source?: string;
-      } | null;
-    }>("/internal/dashen/player-cache", {
-      method: "GET",
-      query: { bnet: b },
-      timeoutMs: 6000,
-    });
-    if (res?.ok && res?.hit && res?.player?.customerToken) {
-      return res.player;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-async function persistCachedBnetPlayer(params: {
-  bnetKey: string;
-  bnetName: string;
-  customerToken: string;
-}): Promise<void> {
-  const bnetKey = String(params.bnetKey || "").replace(/＃/g, "#").trim();
-  const customerToken = String(params.customerToken || "").trim();
-  if (!bnetKey || !customerToken) return;
-  try {
-    await relayInternalRequest("/internal/dashen/player-cache", {
-      method: "POST",
-      body: {
-        bnetKey,
-        bnetName: String(params.bnetName || bnetKey).trim() || bnetKey,
-        customerToken,
-      },
-      timeoutMs: 6000,
-    });
-  } catch {
-    // 忽略缓存写入异常
-  }
-}
-
-// ============================================================================
-// 6. 管理员后台接口封装
-// ============================================================================
-
-async function fetchAdminMe(tgId: number): Promise<AdminMeDto | null> {
+async function fetchAdminMe(operatorId: number): Promise<AdminMeDto | null> {
   try {
     const res = await relayInternalRequest<{ ok: boolean; data: AdminMeDto }>(
       "/internal/admin/me",
       {
         method: "GET",
-        operatorId: tgId,
+        operatorId,
       }
     );
     return res?.data || null;
@@ -1645,7 +1625,10 @@ async function fetchAdminMe(tgId: number): Promise<AdminMeDto | null> {
   }
 }
 
-async function adminQueryUserOrList(operatorId: number, queryText: string) {
+async function adminQueryUserOrList(
+  operatorId: number,
+  queryText: string
+): Promise<any> {
   const res = await relayInternalRequest<{ ok: boolean; data: any }>(
     "/internal/admin/user",
     {
@@ -1655,6 +1638,50 @@ async function adminQueryUserOrList(operatorId: number, queryText: string) {
     }
   );
   return res.data;
+}
+
+async function buildUserCandidateHints(
+  operatorId: number
+): Promise<{
+  bannedSectionLines: string[];
+  allUserLines: string[];
+}> {
+  try {
+    const data = await adminQueryUserOrList(operatorId, "all");
+    const list = Array.isArray(data?.users) ? data.users : [];
+    const bannedUsers = list.filter((u: any) => Boolean(u?.isBanned));
+
+    const bannedSectionLines: string[] = [];
+    if (bannedUsers.length > 0) {
+      bannedSectionLines.push(
+        `🔒 <b>当前已封禁用户（解封点击 ID 复制）</b>`
+      );
+      for (const bu of bannedUsers.slice(0, 15)) {
+        const nameWithId = formatUserNameWithId(bu);
+        bannedSectionLines.push(
+          `• <b>${escapeHtml(nameWithId)}</b> — ID：<code>${Number(bu.tgId)}</code>`
+        );
+      }
+    }
+
+    const allUserLines: string[] = [];
+    if (list.length > 0) {
+      allUserLines.push(`👥 <b>可选用户列表（点击 ID 自动复制）</b>`);
+      for (const u of list.slice(0, 15)) {
+        const nick = String(u.nickname || "无昵称");
+        const tags: string[] = [];
+        if (u.vipActive) tags.push("👑VIP");
+        if (u.isBanned) tags.push("🔒已封禁");
+        allUserLines.push(
+          `• <b>${escapeHtml(nick)}</b> — ID：<code>${Number(u.tgId)}</code>（剩余 ${Number(u.quota || 0)} 次${tags.length ? ` · ${tags.join(" ")}` : ""}）`
+        );
+      }
+    }
+
+    return { bannedSectionLines, allUserLines };
+  } catch {
+    return { bannedSectionLines: [], allUserLines: [] };
+  }
 }
 
 async function adminAddUserQuota(
@@ -1804,22 +1831,6 @@ async function superCreateAdmin(
       method: "POST",
       operatorId,
       body: { targetTgId, remark },
-    }
-  );
-  return res.data;
-}
-
-async function superTogglePerm(
-  operatorId: number,
-  targetTgId: number,
-  permCode: string
-) {
-  const res = await relayInternalRequest<{ ok: boolean; data: any }>(
-    "/internal/admin/admins/permission",
-    {
-      method: "POST",
-      operatorId,
-      body: { targetTgId, permCode },
     }
   );
   return res.data;
@@ -2508,7 +2519,6 @@ async function resolvePlayerWithTokenCache(
     );
   }
 
-  // 1. 先查 Redis 9 号库 -> 回查 MySQL（严格区分大小写）
   const cached = await lookupCachedBnetPlayer(exactBnet);
   if (cached?.customerToken) {
     return {
@@ -2517,7 +2527,6 @@ async function resolvePlayerWithTokenCache(
     };
   }
 
-  // 2. 未命中则调用网易大神 searchBnetAccount
   const searchRes = await searchBnetAccount(exactBnet);
   const extracted = extractCustomerTokenFromSearch(searchRes, exactBnet);
   if (extracted?.customerToken) {
@@ -2532,7 +2541,6 @@ async function resolvePlayerWithTokenCache(
     };
   }
 
-  // 3. 若搜索接口当前未返回有效 data，给出明确提示
   const traceId = String(searchRes?.traceId || "").trim();
   throw new Error(
     `未在缓存中找到 <code>${escapeHtml(exactBnet)}</code>，且网易大神搜索接口当前未返回该玩家令牌` +
@@ -3399,7 +3407,6 @@ async function executeRoastFlow(
 
   inFlightRoastTasks.add(lockKey);
   try {
-    // 1. 优先检查缓存（24小时内命中直接返回，不扣次数）
     const cached = await fetchCachedRoast(cacheKey, params.roastType);
     if (cached?.reviewHtml) {
       const html = decorateRoastHtml({
@@ -3416,13 +3423,11 @@ async function executeRoastFlow(
       return;
     }
 
-    // 2. 鉴权（管理员/VIP 免扣次，普通用户检查剩余次数）
     const auth = await authorizeRoastForUser(ctx);
     if (!auth.allowed) {
       return;
     }
 
-    // 3. 拉取可用 AI 渠道
     const activeCfg = await fetchActiveAiProviders();
     const channels = resolveAvailableChannels(activeCfg);
     if (channels.length === 0) {
@@ -3492,14 +3497,12 @@ async function executeRoastFlow(
 
     const formattedHtml = formatReviewToTelegramHtml(generatedText);
 
-    // 4. 扣减次数（非免扣用户扣 1 次）
     const consumeRes = await consumeRoastQuotaForUser(
       tgId,
       params.roastType,
       `${params.detailLabel} (${exactBnet})`
     );
 
-    // 5. 写入缓存（含渠道与模型信息）
     await saveRoastCacheRecord({
       cacheKey,
       roastType: params.roastType,
@@ -3622,7 +3625,10 @@ async function handleCheckinCommand(ctx: Context): Promise<void> {
   );
 }
 
-async function handleRedeemCodeInput(ctx: Context, rawCode: string): Promise<void> {
+async function handleRedeemCodeInput(
+  ctx: Context,
+  rawCode: string
+): Promise<void> {
   const code = String(rawCode || "").trim().toUpperCase();
   if (!code) {
     await ctx.reply(
@@ -4264,10 +4270,16 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "admin_quota_add" },
         expiresAt: Date.now() + 180_000,
       });
-      await ctx.reply(
-        "➕ 请按格式输入：<code>用户TG_ID 增加次数 原因</code>\n例如：<code>123456789 5 活动奖励</code>",
-        { parse_mode: "HTML" }
-      );
+      const { allUserLines } = await buildUserCandidateHints(tgId);
+      const lines = [
+        `➕ <b>为用户增加锐评次数</b>`,
+        `请按格式输入：<code>用户TG_ID 增加次数 原因</code>`,
+        `例如：<code>123456789 5 活动奖励</code>`,
+      ];
+      if (allUserLines.length > 0) {
+        lines.push(`━━━━━━━━━━━━━━━━━━`, ...allUserLines);
+      }
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
       return;
     }
 
@@ -4303,10 +4315,20 @@ bot.on("callback_query", async (ctx) => {
         action: { type: "admin_user_ban" },
         expiresAt: Date.now() + 180_000,
       });
-      await ctx.reply(
-        "🔒 请按格式输入：<code>用户TG_ID ban|unban 原因</code>\n例如：<code>123456789 ban 刷号</code>",
-        { parse_mode: "HTML" }
-      );
+      const { bannedSectionLines, allUserLines } =
+        await buildUserCandidateHints(tgId);
+      const lines = [
+        `🔒 <b>封禁 / 解封用户</b>`,
+        `请按格式输入：<code>用户TG_ID ban|unban 原因</code>`,
+        `例如：<code>123456789 ban 刷号</code> 或 <code>123456789 unban 申诉通过</code>`,
+      ];
+      if (bannedSectionLines.length > 0) {
+        lines.push(`━━━━━━━━━━━━━━━━━━`, ...bannedSectionLines);
+      }
+      if (allUserLines.length > 0) {
+        lines.push(`━━━━━━━━━━━━━━━━━━`, ...allUserLines);
+      }
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
       return;
     }
 
@@ -4314,11 +4336,12 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCallbackQuery();
       await safeEditTextMessage(
         ctx,
-        "🎟 请选择要生成的卡密类型：",
+        "🎟 <b>生成兑换卡密</b>\n请选择要生成的卡密类型：",
         {
+          parse_mode: "HTML",
           reply_markup: new InlineKeyboard()
-            .text("🎫 锐评次数卡密", "adm:r:c:quota")
-            .text("👑 VIP 天数卡密", "adm:r:c:vip_days")
+            .text("🎫 生成次数卡密", "adm:r:c:quota")
+            .text("👑 生成 VIP 卡密", "adm:r:c:vip_days")
             .row()
             .text("🔙 返回控制台", "adm:home"),
         },
@@ -4331,24 +4354,53 @@ bot.on("callback_query", async (ctx) => {
       await ctx.answerCallbackQuery();
       const rewardType =
         data === "adm:r:c:vip_days" ? "vip_days" : "quota";
+      const typeLabel =
+        rewardType === "vip_days" ? "VIP 天数卡密" : "锐评次数卡密";
+      const unitLabel = rewardType === "vip_days" ? "天" : "次";
       pendingUserInputs.set(tgId, {
         action: { type: "admin_redeem_create", rewardType },
         expiresAt: Date.now() + 180_000,
       });
       await ctx.reply(
-        `🎟 请输入：<code>单张面额 生成张数</code>（最多 50 张）\n例如：<code>5 10</code>`,
+        `🎟 <b>生成${escapeHtml(typeLabel)}</b>\n请输入：<code>单张面额 生成张数</code>（最多 50 张）\n例如：<code>5 10</code>（表示生成 10 张单张 ${escapeHtml(unitLabel)} 对应面额的卡密）`,
         { parse_mode: "HTML" }
       );
       return;
     }
 
     if (data === "adm:r:view") {
-      await ctx.answerCallbackQuery();
-      pendingUserInputs.set(tgId, {
-        action: { type: "admin_redeem_view" },
-        expiresAt: Date.now() + 180_000,
-      });
-      await ctx.reply("🔎 请输入要查询的卡密编号：", { parse_mode: "HTML" });
+      await ctx.answerCallbackQuery({ text: "正在查询全部卡密..." });
+      const info = await adminLookupRedeemCode(tgId, "all");
+      if (info?.isList) {
+        const items = Array.isArray(info.items) ? info.items : [];
+        const lines = [
+          `🔎 <b>全部兑换卡密列表（共 ${Number(info.totalCodes || items.length)} 张，展示最新 ${items.length} 张）</b>`,
+          `━━━━━━━━━━━━━━━━━━`,
+        ];
+        if (items.length === 0) {
+          lines.push(`📭 <i>当前暂无卡密记录。</i>`);
+        } else {
+          for (const c of items) {
+            lines.push(
+              `• <code>${escapeHtml(c.code)}</code> | 类型：<b>${escapeHtml(formatRedeemTypeLabel(c.rewardType))}</b>（${escapeHtml(formatRedeemRewardText(c.rewardType, c.rewardValue))}） | 状态：<b>${escapeHtml(formatRedeemStatusLabel(c.status))}</b>`
+            );
+          }
+        }
+        lines.push(
+          `━━━━━━━━━━━━━━━━━━`,
+          `<i>提示：如需单独查询某张卡密，也可直接发送卡密编号。</i>`
+        );
+        pendingUserInputs.set(tgId, {
+          action: { type: "admin_redeem_view" },
+          expiresAt: Date.now() + 180_000,
+        });
+        await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      } else {
+        await ctx.reply(
+          `🔎 <b>卡密详情</b>\n• 编号：<code>${escapeHtml(info.code)}</code>\n• 类型：<b>${escapeHtml(formatRedeemTypeLabel(info.rewardType))}</b>（面额 <b>${escapeHtml(formatRedeemRewardText(info.rewardType, info.rewardValue))}</b>）\n• 状态：<b>${escapeHtml(formatRedeemStatusLabel(info.status))}</b>`,
+          { parse_mode: "HTML" }
+        );
+      }
       return;
     }
 
@@ -4750,7 +4802,6 @@ bot.on("callback_query", async (ctx) => {
       return;
     }
 
-    // --- 超级管理员：🔑 大神账号轮询 ---
     if (data === "sup:ds:menu") {
       await ctx.answerCallbackQuery();
       await showDashenAccountsPanel(ctx, tgId, true);
@@ -4953,10 +5004,24 @@ bot.on("message:text", async (ctx) => {
 
         if (act.type === "admin_redeem_view") {
           const info = await adminLookupRedeemCode(tgId, text);
-          await ctx.reply(
-            `🔎 <b>卡密详情</b>\n• 编号：<code>${escapeHtml(info.code)}</code>\n• 类型：<code>${escapeHtml(info.rewardType)}</code>（面额 <b>${info.rewardValue}</b>）\n• 状态：<b>${escapeHtml(info.status)}</b>`,
-            { parse_mode: "HTML" }
-          );
+          if (info?.isList) {
+            const items = Array.isArray(info.items) ? info.items : [];
+            const lines = [
+              `🔎 <b>全部兑换卡密列表（共 ${Number(info.totalCodes || items.length)} 张，展示最新 ${items.length} 张）</b>`,
+              `━━━━━━━━━━━━━━━━━━`,
+            ];
+            for (const c of items) {
+              lines.push(
+                `• <code>${escapeHtml(c.code)}</code> | 类型：<b>${escapeHtml(formatRedeemTypeLabel(c.rewardType))}</b>（${escapeHtml(formatRedeemRewardText(c.rewardType, c.rewardValue))}） | 状态：<b>${escapeHtml(formatRedeemStatusLabel(c.status))}</b>`
+              );
+            }
+            await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+          } else {
+            await ctx.reply(
+              `🔎 <b>卡密详情</b>\n• 编号：<code>${escapeHtml(info.code)}</code>\n• 类型：<b>${escapeHtml(formatRedeemTypeLabel(info.rewardType))}</b>（面额 <b>${escapeHtml(formatRedeemRewardText(info.rewardType, info.rewardValue))}</b>）\n• 状态：<b>${escapeHtml(formatRedeemStatusLabel(info.status))}</b>`,
+              { parse_mode: "HTML" }
+            );
+          }
           return;
         }
 
